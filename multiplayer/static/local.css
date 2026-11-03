@@ -10,6 +10,10 @@
 #entry-form > label { display: flex; flex-direction: column; gap: 7px; margin-bottom: 17px; font-size: 13px; }
 #entry-form input, .local-seat-select { border: 1px solid #cdd7d2; background: white; border-radius: 4px; padding: 10px; color: #293d34; min-width: 0; width: 100%; }
 #entry-form > .primary-button { width: 100%; justify-content: center; }
+#invite-form > label { display: flex; flex-direction: column; gap: 7px; margin: 20px 0; font-size: 13px; }
+#invite-form input { border: 1px solid #cdd7d2; background: white; border-radius: 4px; padding: 10px; width: 100%; }
+#invite-form > p { font-size: 13px; }
+#invite-form > .primary-button { width: 100%; justify-content: center; }
 .room-panel { padding: 24px 20px; }
 .room-panel h2 { font-size: 16px; margin: 0; }
 .room-name { color: #7b8980; font-size: 12px; overflow-wrap: anywhere; }

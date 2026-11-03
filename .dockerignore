@@ -1,0 +1,15 @@
+.git
+.venv*
+.data
+.codex
+.agents
+**/__pycache__
+**/.runtime
+**/test
+tests
+.pytest_cache
+design_docs
+*.pdf
+*.env
+.env*
+*.log

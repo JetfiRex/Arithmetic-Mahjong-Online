@@ -106,14 +106,14 @@ class LocalRooms:
 
     def new_client(self) -> str:
         with self.lock:
-            _check(len(self.clients) < 256, "本地测试身份已达到上限，请重启测试服务")
+            _check(len(self.clients) < 256, "临时玩家已达到上限，请稍后重试")
             token = secrets.token_urlsafe(32)
             self.clients[hashlib.sha256(token.encode()).hexdigest()] = LocalClient()
             return token
 
     def client(self, token: str) -> LocalClient:
         key = hashlib.sha256(token.encode()).hexdigest()
-        _check(key in self.clients, "本地测试身份已失效")
+        _check(key in self.clients, "临时玩家身份已失效，请重新进入")
         return self.clients[key]
 
     def tick(self, *, now=None):

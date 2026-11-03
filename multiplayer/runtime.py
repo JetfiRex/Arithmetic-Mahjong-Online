@@ -38,12 +38,16 @@ class TableControl:
 class LiveRooms(LocalRooms):
     """A new instance is a new opening: no database is loaded or deleted."""
 
-    def __init__(self, *, disconnect_seconds=10.0, grace_seconds=300.0, bot_delay=1.0):
+    def __init__(self, *, disconnect_seconds=10.0, grace_seconds=300.0, bot_delay=1.0,
+                 session_ttl_seconds=3600.0):
         super().__init__()
-        for value in (disconnect_seconds, grace_seconds, bot_delay):
+        for value in (disconnect_seconds, grace_seconds, bot_delay, session_ttl_seconds):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError("Runtime intervals must be positive finite numbers")
         self.disconnect_seconds, self.grace_seconds, self.bot_delay = disconnect_seconds, grace_seconds, bot_delay
+        if session_ttl_seconds < disconnect_seconds + grace_seconds:
+            raise ValueError("Session retention must cover reconnect grace")
+        self.session_ttl_seconds = session_ttl_seconds
         self.presence: dict[str, Presence] = {}
         self.tables: dict[str, TableControl] = {}
         self.outage_started_at = None
@@ -52,6 +56,7 @@ class LiveRooms(LocalRooms):
 
     def new_client(self, *, now=None):
         with self.lock:
+            self._expire_clients(self._now(now))
             token = super().new_client()
             self.presence[self.client(token).member_id] = Presence(disconnected_at=self._now(now))
             return token
@@ -96,12 +101,39 @@ class LiveRooms(LocalRooms):
 
     def close_connection(self, token, connection, *, now=None):
         with self.lock:
-            client = self.client(token)
+            try:
+                client = self.client(token)
+            except ValueError:
+                return  # The final socket callback may arrive after cleanup.
             presence = self.presence[client.member_id]
             if connection in presence.connections:
                 presence.connections.remove(connection)
                 if not presence.connections:
                     presence.disconnected_at = self._now(now)
+
+    def _expire_clients(self, now):
+        """Reclaim disconnected guests without invalidating a live round's seats."""
+        for room in list(self.rooms.values()):
+            people = [self.presence[mid] for mid in room.members]
+            lost = [p.disconnected_at for p in people if p.disconnected_at is not None]
+            if not any(p.connections for p in people) and lost and now >= max(lost) + self.session_ttl_seconds:
+                self._close_room(room)
+        for key, client in list(self.clients.items()):
+            p = self.presence[client.member_id]
+            if p.connections or p.disconnected_at is None or now < p.disconnected_at + self.session_ttl_seconds:
+                continue
+            room = self.rooms.get(client.room_id)
+            if room and room.phase == RoomPhase.PLAYING and client.member_id in room.round_members:
+                continue  # Preserve original credentials through pause/autopilot.
+            if room:
+                room.members.pop(client.member_id, None)
+                room.seats = [None if mid == client.member_id else mid for mid in room.seats]
+                table = self.tables.get(room.room_id)
+                if table:
+                    table.seats.pop(client.member_id, None)
+                room.revision += 1
+            self.presence.pop(client.member_id, None)
+            del self.clients[key]
 
     def _new_table(self, room):
         previous = self.tables.get(room.room_id)
@@ -210,6 +242,7 @@ class LiveRooms(LocalRooms):
             self._ticking = True
             try:
                 timestamp = self._now(now)
+                self._expire_clients(timestamp)
                 if self.outage_started_at is None:
                     self._detect_outage(timestamp)
                 if self.outage_started_at is not None:

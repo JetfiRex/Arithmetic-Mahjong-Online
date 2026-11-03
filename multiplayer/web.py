@@ -1,18 +1,19 @@
-"""Single-worker ASGI hosting entry; reset every boot, no Cloudflare identity yet."""
+"""Single-worker ASGI hosting entry with invitation-gated ephemeral guests."""
 
-import argparse
 import asyncio
 from contextlib import asynccontextmanager
 import json
 import logging
 from pathlib import Path
 from threading import Event, Thread
+import time
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from multiplayer.rooms import RoomError
+from multiplayer.hosting import load_config
 from multiplayer.runtime import LiveRooms
 from multiplayer.security import IngressMiddleware, RateLimits, WebSettings
 
@@ -38,6 +39,7 @@ def create_app(*, settings=None, runtime=None):
             while not stop.wait(0.1):
                 try:
                     rooms.tick()
+                    app.state.last_tick_at = time.monotonic()
                 except Exception:
                     # Do not continue a table after an unexpected partial tick.
                     app.state.runtime_failed = True
@@ -57,11 +59,12 @@ def create_app(*, settings=None, runtime=None):
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.rooms = rooms
     app.state.runtime_failed = False
+    app.state.last_tick_at = time.monotonic()
     app.state.pending_sockets = 0
     app.add_middleware(IngressMiddleware, settings=settings)
 
     def healthy():
-        if app.state.runtime_failed:
+        if app.state.runtime_failed or time.monotonic() - app.state.last_tick_at > 10:
             raise HTTPException(503, "游戏运行已暂停，请管理员重新开服")
 
     def token_from(request):
@@ -71,6 +74,7 @@ def create_app(*, settings=None, runtime=None):
         token = authorization[7:]
         with rooms.lock:
             try:
+                rooms.tick()
                 rooms.client(token)
             except RoomError:
                 raise HTTPException(401, "服务器已重新开服或身份已失效") from None
@@ -89,7 +93,7 @@ def create_app(*, settings=None, runtime=None):
     async def http_error(request, exc):
         return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
 
-    @app.get("/healthz")
+    @app.api_route("/healthz", methods=["GET", "HEAD"])
     def health():
         healthy()
         return {"ok": True, "server_instance_id": rooms.instance_id}
@@ -97,9 +101,11 @@ def create_app(*, settings=None, runtime=None):
     @app.post("/api/local/session")
     async def session(request: Request):
         healthy()
-        await body_from(request)
+        body = await body_from(request)
         if not limits.take("sessions", rate=1, burst=12):
             raise HTTPException(429, "创建身份过快，请稍后再试")
+        if not settings.accepts_invite(body.get("invite_code")):
+            return JSONResponse({"error": "请输入有效的朋友邀请码", "code": "invite_required"}, status_code=403)
         try:
             token = await run_in_threadpool(rooms.new_client)
         except RoomError as exc:
@@ -208,25 +214,14 @@ def create_app(*, settings=None, runtime=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="开服即新局；Ctrl+C 关服，下次不恢复。Access 尚未接入，仅本机测试。")
-    parser.add_argument("--port", type=int, default=8771)
-    parser.add_argument("--public-origin", help="预留的精确 HTTPS 来源；配置不代表已接入 Access，勿提前发布 Tunnel")
-    parser.add_argument("--disconnect-seconds", type=float, default=10, help="失去最后一个连接后的交接容错，默认 10 秒")
-    parser.add_argument("--grace-seconds", type=float, default=300, help="每席每局累计宽限，默认 300 秒；缩短仅供隔离验收")
-    args = parser.parse_args()
-    origins = [f"http://127.0.0.1:{args.port}", f"http://localhost:{args.port}"]
-    if args.public_origin:
-        if not args.public_origin.startswith("https://"):
-            parser.error("公开来源必须是 HTTPS")
-        origins.append(args.public_origin)
-    try:
-        app = create_app(settings=WebSettings(tuple(origins)), runtime=LiveRooms(disconnect_seconds=args.disconnect_seconds, grace_seconds=args.grace_seconds))
-    except ValueError as exc:
-        parser.error(str(exc))
-    print(f"Opening: http://127.0.0.1:{args.port}", flush=True)
-    print("Memory only; reset on every process start. Access NOT configured; do not publish a tunnel yet.", flush=True)
+    config = load_config()
+    app = create_app(settings=config.web, runtime=LiveRooms(
+        disconnect_seconds=config.disconnect_seconds, grace_seconds=config.grace_seconds,
+        session_ttl_seconds=config.session_ttl_seconds))
+    print(f"Opening: {config.web.origins[-1]}", flush=True)
+    print(f"Memory only; reset on every process start. Invitations: {'enabled' if config.web.invite_code else 'local testing'}.", flush=True)
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=args.port, workers=1, reload=False, proxy_headers=False,
+    uvicorn.run(app, host=config.host, port=config.port, workers=1, reload=False, proxy_headers=False,
                 access_log=False, server_header=False, ws="websockets", ws_max_size=4096, ws_max_queue=4,
                 ws_ping_interval=5, ws_ping_timeout=10, ws_per_message_deflate=False,
                 limit_concurrency=512, timeout_keep_alive=5, timeout_graceful_shutdown=3)

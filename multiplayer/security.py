@@ -1,9 +1,10 @@
-"""Bounded HTTP/WS ingress for a single-process, loopback-only ASGI server."""
+"""Bounded HTTP/WS ingress for a single-process invited game server."""
 
 import asyncio
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
+import hmac
 import time
 from urllib.parse import urlsplit
 
@@ -16,6 +17,7 @@ MAX_BODY = 65536
 @dataclass(frozen=True)
 class WebSettings:
     origins: tuple[str, ...]
+    invite_code: str = field(default="", repr=False)
 
     def __post_init__(self):
         if not self.origins:
@@ -28,6 +30,17 @@ class WebSettings:
                 raise ValueError("Use an exact origin without path, credentials or wildcard")
             if parts.scheme == "http" and parts.hostname not in {"127.0.0.1", "localhost", "::1"}:
                 raise ValueError("Remote origins require HTTPS")
+        if self.invite_code and not 16 <= len(self.invite_code) <= 128:
+            raise ValueError("INVITE_CODE must contain 16 to 128 characters")
+        if any(urlsplit(o).hostname not in {"127.0.0.1", "localhost", "::1"} for o in self.origins) and not self.invite_code:
+            raise ValueError("Public origins require INVITE_CODE")
+
+    def accepts_invite(self, value):
+        if not self.invite_code:
+            return True
+        return (type(value) is str and len(value) <= 128
+                and hmac.compare_digest(hashlib.sha256(value.encode()).digest(),
+                                        hashlib.sha256(self.invite_code.encode()).digest()))
 
     def permits(self, headers, *, write=False):
         hosts = [v.decode("latin1") for k, v in headers if k.lower() == b"host"]
@@ -78,7 +91,10 @@ class IngressMiddleware:
                 await JSONResponse({"error": message}, status_code=status,
                                    headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})(scope, receive, send)
 
-        if not self.settings.permits(scope["headers"], write=write):
+        # Platform/container probes may use an internal Host. This exception
+        # exposes only readiness; it never applies to the page or game APIs.
+        health_probe = not websocket and method in {"GET", "HEAD"} and scope.get("path") == "/healthz"
+        if not health_probe and not self.settings.permits(scope["headers"], write=write):
             return await fail(403, "域名或来源不被允许")
         headers = dict(scope["headers"])
         # Opening the public entry page from an external link is a normal
@@ -88,9 +104,9 @@ class IngressMiddleware:
             and headers.get(b"sec-fetch-mode") == b"navigate"
             and headers.get(b"sec-fetch-dest") == b"document"
         )
-        if headers.get(b"sec-fetch-site") == b"cross-site" and not entry_navigation:
+        if headers.get(b"sec-fetch-site") == b"cross-site" and not entry_navigation and not health_probe:
             return await fail(403, "不允许跨站请求")
-        if not self.limits.take("global", rate=400, burst=800):
+        if not health_probe and not self.limits.take("global", rate=400, burst=800):
             return await fail(429, "请求过多，请稍后重试")
         if write:
             key = hashlib.sha256(headers.get(b"authorization", b"anonymous")).hexdigest()

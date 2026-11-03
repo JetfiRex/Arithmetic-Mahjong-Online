@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: arithmetic-mahjong-online
+    runtime: docker
+    plan: 0.5c-512mb
+    numInstances: 1
+    healthCheckPath: /healthz
+    autoDeployTrigger: "off"
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: "10000"
+      - key: WEB_CONCURRENCY
+        value: "1"
+      - key: INVITE_CODE
+        generateValue: true
+      - key: SESSION_TTL_SECONDS
+        value: "3600"

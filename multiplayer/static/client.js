@@ -1,6 +1,6 @@
 "use strict";
 
-// This transport is intentionally local-only. The existing board renderer stays shared.
+// Same-origin HTTP/WS transport; the board renderer is shared with local practice.
 window.localMultiplayer = {
   token: sessionStorage.getItem("mahjong-local-token"),
   entryMode: "create",
@@ -17,6 +17,48 @@ window.localMultiplayer = {
   connectionId: null,
   retryAt: 0,
   connectionShownFor: null,
+  inviteRequired: false,
+  inviteInitialized: false,
+
+  async createSession(inviteCode) {
+    const response = await fetch("/api/local/session", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(inviteCode === undefined ? {} : { invite_code: inviteCode }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      if (data.code === "invite_required") this.showInvite();
+      throw new Error(data.error || "暂时无法进入，请稍后重试");
+    }
+    this.token = data.token;
+    sessionStorage.setItem("mahjong-local-token", this.token);
+    this.inviteRequired = false;
+    $("invite-entry").hidden = true;
+  },
+
+  showInvite() {
+    this.inviteRequired = true;
+    $("invite-entry").hidden = false;
+    $("local-entry").hidden = true;
+    document.querySelector(".workspace").hidden = true;
+    for (const dialog of document.querySelectorAll("dialog[open]")) dialog.close();
+    if (this.inviteInitialized) return;
+    this.inviteInitialized = true;
+    $("invite-form").onsubmit = async (event) => {
+      event.preventDefault();
+      $("invite-submit").disabled = true;
+      $("invite-error").textContent = "";
+      try {
+        await this.createSession($("invite-code").value);
+        $("invite-code").value = "";
+        poll();
+      } catch (error) {
+        $("invite-error").textContent = error.message;
+      } finally {
+        $("invite-submit").disabled = false;
+      }
+    };
+  },
 
   ensureSocket() {
     if (!state?.network?.enabled || !this.token) return;
@@ -46,11 +88,8 @@ window.localMultiplayer = {
   async poll() {
     if (this.token && state?.network?.enabled) this.ensureSocket();
     if (!this.token) {
-      const response = await fetch("/api/local/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error);
-      this.token = data.token;
-      sessionStorage.setItem("mahjong-local-token", this.token);
+      if (this.inviteRequired) throw new Error("等待输入邀请码");
+      await this.createSession();
     }
     const response = await fetch("/api/local/state", { headers: { Authorization: `Bearer ${this.token}` }, cache: "no-store" });
     if (response.status === 401) {
@@ -385,7 +424,7 @@ window.localMultiplayer = {
     $("entry-submit").disabled = !!state.network?.enabled && !this.connectionId;
     $("restart-button").disabled = !room?.is_host || room.phase === "REVIEWING";
     $("restart-button").title = "房主设置";
-    $("table-mode").replaceChildren(document.createTextNode("LOCAL TABLE"), element("span", "", room?.name || ""));
+    $("table-mode").replaceChildren(document.createTextNode(state.network?.enabled && !state.bot_play ? "ONLINE TABLE" : "LOCAL TABLE"), element("span", "", room?.name || ""));
     document.querySelector(".hand-title h1").textContent = viewerId() ? "我的手牌" : `${me().name} · 观战`;
     $("discard-label").textContent = viewerId() ? "我的弃牌" : `${me().name}的弃牌`;
     $("discard-river").setAttribute("aria-label", $("discard-label").textContent);
