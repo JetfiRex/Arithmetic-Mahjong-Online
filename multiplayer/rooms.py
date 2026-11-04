@@ -56,7 +56,6 @@ class LocalClient:
     notice: str = ""
     sequence: int = 0
     signature: str = ""
-    recovery_code: str = field(default_factory=lambda: secrets.token_urlsafe(18))
 
 
 @dataclass
@@ -119,6 +118,9 @@ class LocalRooms:
         _check(key in self.clients, "临时玩家身份已失效，请重新进入")
         return self.clients[key]
 
+    def _rejoin_member(self, token, room, member, *, now):
+        raise RoomError("用户名重复，对方仍在线，请更换用户名或稍后重试")
+
     def tick(self, *, now=None):
         """Only timers and real draws advance automatically, never human passes."""
         with self.lock:
@@ -173,9 +175,12 @@ class LocalRooms:
                     room = existing
                     digest = hashlib.pbkdf2_hmac("sha256", password.encode(), room.salt, 600000)
                     _check(hmac.compare_digest(digest, room.password_hash), "房间名或密码不正确")
+                    same_name = next((member for member in room.members.values() if member.name.casefold() == username.casefold()), None)
+                    if same_name is not None:
+                        _check(not same_name.is_bot, "这个用户名已由 Bot 使用，请更换用户名")
+                        self._rejoin_member(token, room, same_name, now=timestamp)
+                        return self.view(token, now=timestamp)
                     _check(sum(not member.is_bot for member in room.members.values()) < 10, "房间最多容纳 10 位真人，Bot 不占人数")
-                    _check(all(member.name.casefold() != username.casefold() for member in room.members.values()),
-                           "房间内已有人使用这个用户名；返回原页面，或用个人恢复码找回身份")
                 room.members[client.member_id] = Member(client.member_id, username)
                 client.room_id, client.notice = room.room_id, ""
                 room.revision += 1
@@ -391,7 +396,7 @@ class LocalRooms:
                 viewer_seat=game.get_player(pid).seat if pid is not None else member.spectator_seat if member and started else None,
                 hand_revision=room.hand_revisions.get(pid, 0) if room else 0,
                 server_now=timestamp, notice=client.notice,
-                identity={"member_id": client.member_id, "recovery_code": client.recovery_code,
+                identity={"member_id": client.member_id,
                           "username": member.name if member else "", "room_name": room.name if room else ""},
                 room=None if room is None else {
                     "room_id": room.room_id, "name": room.name, "host_id": room.host_id,

@@ -2,15 +2,13 @@
 
 from dataclasses import dataclass, field
 import hashlib
-import hmac
 import json
 import math
-import secrets
 import time
 from uuid import uuid4
 
 from multiplayer.autopilot import discard_drawn_tile, pass_response
-from multiplayer.rooms import LocalRooms, RoomPhase, _check, _name
+from multiplayer.rooms import LocalRooms, RoomPhase, _check
 from simulator import GamePhase
 from simulator.state_snapshot import shift_game_clock
 
@@ -64,35 +62,23 @@ class LiveRooms(LocalRooms):
             self.presence[self.client(token).member_id] = Presence(disconnected_at=self._now(now))
             return token
 
-    def recover_client(self, token, *, room_name, username, recovery_code, now=None):
-        """Reclaim the existing member, rotate credentials and fence old sockets."""
-        with self.lock:
-            timestamp = self._now(now)
-            self.tick(now=timestamp)
-            visitor = self.client(token)
-            _check(visitor.room_id is None, "请先离开当前房间，再找回身份")
-            name, username = _name(room_name), _name(username, maximum=24)
-            _check(type(recovery_code) is str and 1 <= len(recovery_code) <= 128, "请填写个人恢复码")
-            room = next((r for r in self.rooms.values() if r.name.casefold() == name.casefold()), None)
-            member = next((m for m in room.members.values() if not m.is_bot and m.name.casefold() == username.casefold()), None) if room else None
-            entry = next(((key, client) for key, client in self.clients.items()
-                          if member and client.member_id == member.member_id and client.room_id == room.room_id), None)
-            expected = entry[1].recovery_code if entry else "invalid-recovery-code"
-            matches = hmac.compare_digest(hashlib.sha256(recovery_code.encode()).digest(), hashlib.sha256(expected.encode()).digest())
-            _check(entry is not None and matches, "房间、用户名或恢复码不正确，或原房间已关闭")
-            old_key, original = entry
-            self.clients.pop(hashlib.sha256(token.encode()).hexdigest())
-            self.presence.pop(visitor.member_id, None)
-            self.clients.pop(old_key)
-            replacement = secrets.token_urlsafe(32)
-            self.clients[hashlib.sha256(replacement.encode()).hexdigest()] = original
-            original.recovery_code = secrets.token_urlsafe(18)
-            presence = self.presence[original.member_id]
-            presence.connections.clear()
-            presence.disconnected_at = timestamp
-            original.notice = "已找回原身份，请保存新的个人恢复码"
-            room.revision += 1
-            return replacement
+    def _rejoin_member(self, token, room, member, *, now):
+        """Password-checked join adopts an offline member under the room lock."""
+        presence = self.presence[member.member_id]
+        _check(not presence.connections, "用户名重复，对方仍在线，请更换用户名或稍后重试")
+        entry = next(((key, client) for key, client in self.clients.items()
+                      if client.member_id == member.member_id and client.room_id == room.room_id), None)
+        _check(entry is not None, "原玩家身份已过期，请更换用户名重新加入")
+        old_key, original = entry
+        visitor = self.client(token)
+        incoming = self.presence.pop(visitor.member_id)
+        self.clients.pop(old_key)
+        self.clients[hashlib.sha256(token.encode()).hexdigest()] = original
+        presence.connections = set(incoming.connections)
+        presence.disconnected_at = None
+        original.notice = "已重连原玩家，保留原座位和本局状态"
+        room.revision += 1
+        self._resume_member(original, now)
 
     @staticmethod
     def _now(now):
@@ -118,19 +104,22 @@ class LiveRooms(LocalRooms):
             connection = str(uuid4())
             presence.connections.add(connection)
             presence.disconnected_at = None
-            room = self.rooms.get(client.room_id)
-            table = self.tables.get(client.room_id)
-            if room and table:
-                control = table.seats.get(client.member_id)
-                if control and control.grace_deadline is not None:
-                    control.remaining_grace = max(0.0, control.grace_deadline - (self.outage_started_at if self.outage_started_at is not None else timestamp))
-                    control.grace_deadline = None
-                    control.epoch += 1
-                    room.revision += 1
-                    if self.outage_started_at is None:
-                        self._resume_if_ready(room, table, timestamp)
-            self._resume_outage_if_ready(timestamp)
+            self._resume_member(client, timestamp)
             return connection
+
+    def _resume_member(self, client, now):
+        room = self.rooms.get(client.room_id)
+        table = self.tables.get(client.room_id)
+        if room and table:
+            control = table.seats.get(client.member_id)
+            if control and control.grace_deadline is not None:
+                control.remaining_grace = max(0.0, control.grace_deadline - (self.outage_started_at if self.outage_started_at is not None else now))
+                control.grace_deadline = None
+                control.epoch += 1
+                room.revision += 1
+                if self.outage_started_at is None:
+                    self._resume_if_ready(room, table, now)
+        self._resume_outage_if_ready(now)
 
     def close_connection(self, token, connection, *, now=None):
         with self.lock:
@@ -335,7 +324,7 @@ class LiveRooms(LocalRooms):
             table = self.tables.get(client.room_id)
             kind = command.get("type")
             view_only = kind == "spectate"
-            _check(view_only or self.outage_started_at is None or (room and kind == "leave" and client.member_id == room.host_id), "服务连接恢复中，请等原成员返回")
+            _check(view_only or kind == "join" or self.outage_started_at is None or (room and kind == "leave" and client.member_id == room.host_id), "服务连接恢复中，请等原成员返回")
             if room:
                 if table and client.member_id in table.seats:
                     control = table.seats[client.member_id]
@@ -347,6 +336,7 @@ class LiveRooms(LocalRooms):
                 if type(seats) is list and all(type(mid) is str and mid in self.presence for mid in seats):
                     _check(all(self._connected(mid) for mid in seats), "请等四位参赛者实时连接就绪后开局")
             super().dispatch(token, command, now=timestamp)
+            client = self.client(token)
             room = self.rooms.get(client.room_id)
             if room and kind == "start" and (room.room_id not in self.tables or self.tables[room.room_id].round_id != room.game.round_id):
                 self._new_table(room)

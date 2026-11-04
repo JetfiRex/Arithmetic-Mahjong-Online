@@ -11,8 +11,6 @@
 #entry-form input, .local-seat-select { border: 1px solid #cdd7d2; background: white; border-radius: 4px; padding: 10px; color: #293d34; min-width: 0; width: 100%; }
 #entry-form > .primary-button { width: 100%; justify-content: center; }
 #entry-form > label[hidden] { display: none; }
-.identity-code-label { display: grid; gap: 8px; margin: 18px 0; font-size: 13px; }
-.identity-code-label input { min-width: 0; width: 100%; padding: 10px; font: inherit; }
 #identity-saved { display: grid; gap: 8px; }
 .spectator-seat-control { display: grid; gap: 8px; width: 100%; font-size: 12px; }
 .spectator-seat-control select { min-width: 0; width: 100%; padding: 9px; font: inherit; }

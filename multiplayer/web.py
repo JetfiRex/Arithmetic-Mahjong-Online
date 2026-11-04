@@ -134,20 +134,6 @@ def create_app(*, settings=None, runtime=None):
             except RoomError:
                 raise HTTPException(401, "身份已切换或失效，请重新进入") from None
 
-    @app.post("/api/local/recover")
-    async def recover(request: Request):
-        healthy()
-        token = token_from(request)
-        body = await body_from(request)
-        if not limits.take("recoveries", rate=1, burst=8):
-            raise HTTPException(429, "找回尝试过快，请稍后重试")
-        try:
-            replacement = await run_in_threadpool(rooms.recover_client, token, room_name=body.get("room_name"),
-                                                username=body.get("username"), recovery_code=body.get("recovery_code"))
-        except RoomError as exc:
-            raise HTTPException(400, str(exc)) from None
-        return {"token": replacement, "server_instance_id": rooms.instance_id}
-
     @app.post("/api/local/action")
     async def action(request: Request):
         healthy()

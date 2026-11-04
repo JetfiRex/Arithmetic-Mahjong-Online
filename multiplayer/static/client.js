@@ -15,6 +15,7 @@ function storeMahjongIdentities(values) {
 const mahjongNewPlayer = new URLSearchParams(location.search).has("new");
 window.localMultiplayer = {
   token: mahjongNewPlayer ? null : sessionStorage.getItem("mahjong-local-token") || savedMahjongIdentities()[0]?.token,
+  identityGeneration: 0,
   entryMode: "create",
   initialized: false,
   lastNotice: "",
@@ -38,13 +39,13 @@ window.localMultiplayer = {
     if (!identity || !state.room) return;
     const values = savedMahjongIdentities();
     const existing = values.find((v) => v.member_id === identity.member_id && v.server_instance_id === state.server_instance_id);
-    if (existing?.token === this.token && existing.room_name === identity.room_name && existing.username === identity.username
-        && existing.recovery_code === identity.recovery_code) return;
+    if (existing?.token === this.token && existing.room_name === identity.room_name && existing.username === identity.username) return;
     storeMahjongIdentities([{...identity, token: this.token, server_instance_id: state.server_instance_id},
       ...values.filter((v) => v.member_id !== identity.member_id)]);
   },
 
   useIdentity(token) {
+    this.identityGeneration++;
     const saved = savedMahjongIdentities(), chosen = saved.find((value) => value.token === token);
     if (chosen) storeMahjongIdentities([chosen, ...saved.filter((value) => value.token !== token)]);
     this.token = token; sessionStorage.setItem("mahjong-local-token", token);
@@ -56,7 +57,6 @@ window.localMultiplayer = {
   openIdentity() {
     const identity = state?.identity;
     $("identity-summary").textContent = identity?.room_name ? `${identity.username} · ${identity.room_name}` : "当前还未加入房间";
-    $("identity-code").value = identity?.recovery_code || "";
     const list = $("identity-saved"); list.replaceChildren();
     for (const saved of savedMahjongIdentities()) {
       const button = element("button", "secondary-button", `${saved.username} · ${saved.room_name}`); button.type = "button";
@@ -64,16 +64,6 @@ window.localMultiplayer = {
       list.append(button);
     }
     if (!$("identity-dialog").open) $("identity-dialog").showModal();
-  },
-
-  async recoverIdentity(values) {
-    const response = await fetch("/api/local/recover", {
-      method: "POST", headers: {"Content-Type": "application/json", Authorization: `Bearer ${this.token}`},
-      body: JSON.stringify(values),
-    });
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "找回失败");
-    this.useIdentity(result.token);
   },
 
   async createSession(inviteCode) {
@@ -148,8 +138,9 @@ window.localMultiplayer = {
       await this.createSession();
     }
     const token = this.token;
+    const generation = this.identityGeneration;
     const response = await fetch("/api/local/state", { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
-    if (token !== this.token) throw new Error("身份已切换");
+    if (token !== this.token || generation !== this.identityGeneration) throw new Error("身份已切换");
     if (response.status === 401) {
       const saved = savedMahjongIdentities();
       const replacement = saved.find((v) => v.member_id === state?.session_id && v.token !== token);
@@ -158,12 +149,13 @@ window.localMultiplayer = {
       sessionStorage.removeItem("mahjong-local-token");
       this.connectionId = null;
       if (this.socket) { this.socket.close(); this.socket = null; }
-      if (state?.network?.enabled) toast("身份已过期或服务已重启；原房间仍在时，可用个人恢复码找回");
+      if (state?.network?.enabled) toast("原身份已失效；原房间仍在时，使用原用户名和房间密码重新加入即可");
     }
     return response;
   },
 
   send(type, data) {
+    if (type === "join" || type === "create") this.identityGeneration++;
     return fetch("/api/local/action", {
       method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.token}` },
       body: JSON.stringify({ type, command_id: crypto.randomUUID(), room_id: state.room?.room_id,
@@ -191,10 +183,6 @@ window.localMultiplayer = {
     const tools = document.querySelector(".header-tools");
     const identityButton = element("button", "tool-button", "我的身份"); identityButton.id = "local-identity";
     identityButton.onclick = () => this.openIdentity(); tools.prepend(identityButton);
-    $("identity-copy").onclick = async () => {
-      try { await navigator.clipboard.writeText($("identity-code").value); toast("个人恢复码已复制，请私下保存"); }
-      catch { $("identity-code").select(); toast("请手动复制个人恢复码"); }
-    };
     const settlements = element("button", "tool-button", "胡牌记录"); settlements.id = "local-settlements";
     settlements.hidden = true; settlements.onclick = showResult; tools.prepend(settlements);
     const resultWall = element("button", "secondary-button", "查看牌山");
@@ -213,27 +201,13 @@ window.localMultiplayer = {
     close.onclick = () => $("developer-panel").classList.remove("open"); heading.append(close);
     panel.append(heading, element("p", "room-name"), element("div", "room-roster"), element("div", "room-controls"));
     $("developer-panel").append(panel);
-    for (const mode of ["create", "join", "recover"]) $(`${mode}-tab`).onclick = () => {
+    for (const mode of ["create", "join"]) $(`${mode}-tab`).onclick = () => {
       this.entryMode = mode; $("entry-error").textContent = "";
       $("create-tab").classList.toggle("active", mode === "create"); $("join-tab").classList.toggle("active", mode === "join");
-      $("recover-tab").classList.toggle("active", mode === "recover");
-      $("local-password-label").hidden = mode === "recover"; $("local-password").required = mode !== "recover";
-      $("local-recovery-label").hidden = mode !== "recover"; $("local-recovery-code").required = mode === "recover";
-      $("entry-submit").textContent = mode === "create" ? "创建房间" : mode === "join" ? "加入房间" : "找回原身份";
+      $("entry-submit").textContent = mode === "create" ? "创建房间" : "加入房间";
     };
     $("entry-form").onsubmit = async (event) => {
       event.preventDefault(); $("entry-error").textContent = "";
-      if (this.entryMode === "recover") {
-        if (busy) return;
-        busy = true;
-        try {
-          await this.recoverIdentity({room_name: $("local-room-name").value, username: $("local-username").value,
-            recovery_code: $("local-recovery-code").value.trim()});
-          $("local-recovery-code").value = "";
-        } catch (error) { $("entry-error").textContent = error.message; }
-        finally { busy = false; poll(); }
-        return;
-      }
       await send(this.entryMode, { username: $("local-username").value, room_name: $("local-room-name").value, password: $("local-password").value });
       if (!state.room) $("entry-error").textContent = $("toast").textContent;
       else $("local-password").value = "";
