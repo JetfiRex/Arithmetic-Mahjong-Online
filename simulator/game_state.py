@@ -631,9 +631,7 @@ class GameState:
         *,
         source_turn_window_id: Optional[str] = None,
     ) -> None:
-        self._require_phase(GamePhase.WAITING_TURN_ACTION)
-        self._require_turn_window(source_turn_window_id)
-        player = self._require_active_player(player_id)
+        player = self._require_layout_player(player_id)
         player.move_tile(from_index, to_index)
         self._log_event(
             "hand_tile_reordered",
@@ -652,9 +650,7 @@ class GameState:
         group_id: Optional[str] = None,
         source_turn_window_id: Optional[str] = None,
     ) -> None:
-        self._require_phase(GamePhase.WAITING_TURN_ACTION)
-        self._require_turn_window(source_turn_window_id)
-        player = self._require_active_player(player_id)
+        player = self._require_layout_player(player_id)
         player.move_tile_by_id(tile_id, to_index, group_id=group_id)
         self._log_event(
             "hand_tile_moved",
@@ -672,9 +668,7 @@ class GameState:
         *,
         source_turn_window_id: Optional[str] = None,
     ) -> HandGroup:
-        self._require_phase(GamePhase.WAITING_TURN_ACTION)
-        self._require_turn_window(source_turn_window_id)
-        player = self._require_active_player(player_id)
+        player = self._require_layout_player(player_id)
         group = player.create_hand_group(tile_ids)
         self._log_event(
             "hand_group_created",
@@ -692,9 +686,7 @@ class GameState:
         *,
         source_turn_window_id: Optional[str] = None,
     ) -> HandGroup:
-        self._require_phase(GamePhase.WAITING_TURN_ACTION)
-        self._require_turn_window(source_turn_window_id)
-        player = self._require_active_player(player_id)
+        player = self._require_layout_player(player_id)
         group = player.disband_hand_group(group_id)
         self._log_event(
             "hand_group_disbanded",
@@ -1989,6 +1981,18 @@ class GameState:
         if player.seat != self.current_turn_seat:
             raise GameStateError(f"当前不是玩家 {player_id} 的回合")
         return player
+
+    def _require_layout_player(self, player_id: str) -> PlayerState:
+        """Private layout never consumes an action or depends on its window.
+
+        The optional legacy source_turn_window_id parameters are retained for
+        callers; network layout commands instead validate round and hand revision.
+        Stable tile IDs also preserve pending chi and rob-kong selections.
+        """
+        if self.phase not in {GamePhase.WAITING_TURN_ACTION, GamePhase.WAITING_RESPONSE,
+                              GamePhase.WAITING_ACTION_DETAIL, GamePhase.WAITING_ROB_KONG}:
+            raise GameStateError("当前没有可整理的手牌")
+        return self._require_active_player(player_id)
 
     def _require_active_player(self, player_id: str) -> PlayerState:
         player = self.get_player(player_id)

@@ -14,7 +14,8 @@ from starlette.concurrency import run_in_threadpool
 
 from multiplayer.rooms import RoomError
 from multiplayer.hosting import load_config
-from multiplayer.runtime import LiveRooms
+from multiplayer.bot_rooms import BotRooms
+from multiplayer.bot_worker import OnDemandPolicyWorker
 from multiplayer.security import IngressMiddleware, RateLimits, WebSettings
 
 
@@ -28,7 +29,7 @@ ASSETS = {"icons.svg", "tile-back.svg", "LICENSE-lucide.txt"}
 
 def create_app(*, settings=None, runtime=None):
     settings = settings or WebSettings(("http://127.0.0.1:8771", "http://localhost:8771"))
-    rooms = runtime or LiveRooms()
+    rooms = runtime or BotRooms(OnDemandPolicyWorker(), practice=False)
     limits = RateLimits()
 
     @asynccontextmanager
@@ -215,7 +216,7 @@ def create_app(*, settings=None, runtime=None):
 
 def main():
     config = load_config()
-    app = create_app(settings=config.web, runtime=LiveRooms(
+    app = create_app(settings=config.web, runtime=BotRooms(OnDemandPolicyWorker(), practice=False,
         disconnect_seconds=config.disconnect_seconds, grace_seconds=config.grace_seconds,
         session_ttl_seconds=config.session_ttl_seconds))
     print(f"Opening: {config.web.origins[-1]}", flush=True)

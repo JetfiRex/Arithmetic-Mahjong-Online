@@ -309,7 +309,7 @@ class LocalRooms:
     def _game_command(game, pid, kind, command, now):
         """Bind every intention to its real seat and require its original window."""
         turn = command.get("turn_window_id")
-        if kind in {"discard", "turn_action", "move", "group", "disband"}:
+        if kind in {"discard", "turn_action"}:
             _check(type(turn) is str and turn == game.turn_window_id, "出牌窗口已变化")
         if kind == "discard":
             game.discard_tile_by_id(pid, command["tile_id"], now=now, source_turn_window_id=turn)
@@ -400,8 +400,9 @@ class LocalRooms:
                     "round_number": room.round_number if room else 0,
                     "settings_locked": room is not None and room.phase not in {RoomPhase.WAITING_PLAYERS, RoomPhase.ARRANGING},
                     "timeout_settings": room.timeouts if room else dict(vars(DEFAULT_TIMEOUTS)),
-                    "grouping_allowed": pid is not None and not game.get_player(pid).is_out
-                        and game.phase == GamePhase.WAITING_TURN_ACTION,
+                    "grouping_allowed": pid is not None and not game.get_player(pid).is_out and game.phase in {
+                        GamePhase.WAITING_TURN_ACTION, GamePhase.WAITING_RESPONSE,
+                        GamePhase.WAITING_ACTION_DETAIL, GamePhase.WAITING_ROB_KONG},
                     "editing_allowed": False, "scene": "", "scenes": {}, "phase_history": [],
                     "drawn_tile_id": game.drawn_tile_id if pid == game.current_player().player_id else None},
             )

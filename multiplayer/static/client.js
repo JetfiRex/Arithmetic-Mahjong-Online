@@ -115,9 +115,9 @@ window.localMultiplayer = {
   initialize() {
     this.initialized = true;
     $("local-rule-mode").onchange = () => {
-      $("local-blood-bot-note").hidden = !state.bot_play || $("local-rule-mode").value !== "blood_battle";
+      $("local-blood-bot-note").hidden = !(state.bot_settings || state.bot_play) || $("local-rule-mode").value !== "blood_battle";
     };
-    $("bot-add").onclick = () => send("add_bot", { profile: !state.bot_play?.profile_states || state.bot_play.profile_states["rl-fast"]?.available ? "rl-fast" : "fast" });
+    $("bot-add").onclick = () => send("add_bot", { profile: $("bot-add-profile").value });
     $("room-resume").onclick = async () => {
       if (!await send("resume_room", { recovery_id: state.room?.recovery?.recovery_id })) $("room-recovery-error").textContent = $("toast").textContent;
     };
@@ -125,7 +125,7 @@ window.localMultiplayer = {
     const wallButton = element("button", "local-wall-button"); wallButton.id = "local-wall-button";
     wallButton.type = "button"; wallButton.title = "查看本局牌山"; wallButton.setAttribute("aria-label", wallButton.title);
     stack.replaceWith(wallButton); wallButton.append(stack); wallButton.onclick = () => this.openWallReview();
-    document.title = "算术麻将 · 本地多人";
+    document.title = "算术麻将 · 联机牌桌";
     const tools = document.querySelector(".header-tools");
     const settlements = element("button", "tool-button", "胡牌记录"); settlements.id = "local-settlements";
     settlements.hidden = true; settlements.onclick = showResult; tools.prepend(settlements);
@@ -300,12 +300,14 @@ window.localMultiplayer = {
   },
 
   renderBotSettings() {
-    const config = state.bot_play;
+    const config = state.bot_settings || state.bot_play;
     $("bot-settings").hidden = !config;
     if (!config || !state.room) return;
-    $("bot-model-status").textContent = `CPU · ${config.compute_ms} ms${config.worker_ready ? "" : " · 本局保底"}`;
+    $("bot-model-status").textContent = state.bot_play
+      ? `CPU · ${config.compute_ms} ms${config.worker_ready ? "" : " · 本局保底"}`
+      : "朋友与 Bot 可以混合入座，开局后锁定本局配置。";
     const modelList = $("bot-model-list"); modelList.replaceChildren();
-    for (const [kind, model] of Object.entries(config.models || {})) {
+    for (const [kind, model] of Object.entries(state.bot_play ? config.models || {} : {})) {
       const label = config.profile_groups[kind];
       const status = model.available ? `${model.iteration == null ? "冻结" : `第 ${model.iteration} 轮`} · ${model.sha256.slice(0, 12)}` : model.error || "未配置模型";
       modelList.append(element("div", model.available ? "" : "unavailable", `${label} · ${status}`));
@@ -314,7 +316,7 @@ window.localMultiplayer = {
     const locked = state.room.phase === "PLAYING" || ui().recovery_pending || !this.connectionId;
     const bots = state.room.members.filter((m) => m.is_bot);
     for (const bot of bots) {
-      const label = element("label", "bot-profile-row", bot.name);
+      const label = element("div", "bot-profile-row"); label.append(element("span", "", bot.name));
       const select = element("select"); select.setAttribute("aria-label", `${bot.name}策略`); select.dataset.memberId = bot.member_id;
       for (const [kind, title] of Object.entries(config.profile_groups || { all: "策略" })) {
         const group = element("optgroup"); group.label = title;
@@ -329,8 +331,19 @@ window.localMultiplayer = {
       }
       select.value = bot.bot_profile; select.disabled = locked;
       select.onchange = () => send("set_bot", { member_id: bot.member_id, profile: select.value });
-      label.append(select); root.append(label);
+      const remove = element("button", "text-button", "移除"); remove.type = "button"; remove.disabled = locked;
+      remove.setAttribute("aria-label", `移除 ${bot.name}`);
+      remove.onclick = () => send("kick", { member_id: bot.member_id });
+      label.append(select, remove); root.append(label);
     }
+    const addProfile = $("bot-add-profile"), previous = addProfile.value;
+    addProfile.replaceChildren();
+    for (const [value, title] of Object.entries(config.profiles)) {
+      if (config.profile_states?.[value]?.available === false) continue;
+      const option = element("option", "", title); option.value = value; addProfile.append(option);
+    }
+    addProfile.value = [...addProfile.options].some((o) => o.value === previous) ? previous : "win-random";
+    addProfile.disabled = locked;
     $("bot-add").disabled = locked || bots.length >= 3 || state.room.members.length >= 10;
   },
 

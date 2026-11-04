@@ -1,5 +1,6 @@
-"""One low-priority CPU policy process, shared serially by the practice bots."""
+"""One low-priority CPU policy process, shared serially across bot tables."""
 
+from collections import OrderedDict
 from dataclasses import replace
 import multiprocessing as mp
 import os
@@ -58,22 +59,24 @@ def _serve(pipe, exports):
         rl = models["rl"]
         pipe.send({"ready": True, "sha256": rl.get("sha256"), "iteration": rl.get("iteration"),
                    "models": models, "cpu_only": True, "torch_loaded": False})
-        bots, current_round = {}, None
+        bots = OrderedDict()
         while True:
             message = pipe.recv()
             if message is None:
                 return
             round_id, pid, seat, profile, seed, request, deadline = message
-            if round_id != current_round:
-                bots, current_round = {}, round_id
             started = time.monotonic()
             try:
-                key = (pid, seat, profile)
+                # Round IDs isolate policies when several rooms share this worker.
+                key = (round_id, pid, seat, profile, seed)
                 if key not in bots:
                     bot = make_practice_bot(profile, seed=seed, seat=seat, model_paths=paths)
                     if hasattr(bot, "warmup"):
                         bot.warmup()
                     bots[key] = bot
+                bots.move_to_end(key)
+                while len(bots) > 64:
+                    bots.popitem(last=False)
                 bot = bots[key]
                 # Cooperative analysis stops early; the process watchdog keeps
                 # the full hard limit for a non-interruptible rules call.
@@ -191,3 +194,46 @@ class PolicyWorker:
             if self.pipe is not None:
                 self.pipe.close()
             self.process = self.pipe = None
+
+
+class OnDemandPolicyWorker:
+    """Human-only games need no child process or model dependencies."""
+
+    def __init__(self):
+        self.worker = None
+        self.lock = RLock()
+
+    @property
+    def ready(self):
+        return self.worker is not None and self.worker.ready
+
+    @property
+    def info(self):
+        return self.worker.info if self.worker is not None else {"models": {
+            kind: {"available": False, "error": "联机服务未配置训练模型"}
+            for kind in ("nn", "rl", "cfr", "acfr")}}
+
+    def restart(self):
+        with self.lock:
+            if self.ready:
+                return
+            if self.worker is None:
+                self.worker = PolicyWorker(models={})
+            else:
+                self.worker.restart()
+
+    def submit(self, *args, **kwargs):
+        return self.worker is not None and self.worker.submit(*args, **kwargs)
+
+    def poll(self):
+        return self.worker.poll() if self.worker is not None else None
+
+    def retire(self):
+        if self.worker is not None:
+            self.worker.retire()
+
+    def close(self):
+        with self.lock:
+            if self.worker is not None:
+                self.worker.close()
+                self.worker = None

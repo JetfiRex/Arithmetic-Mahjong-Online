@@ -1,4 +1,4 @@
-"""Live human/bot practice, reusing the untouched bot contract and human command path."""
+"""Mixed human/bot rooms using the same human commands and trusted bot adapter."""
 
 from collections import Counter
 from dataclasses import dataclass
@@ -36,17 +36,19 @@ class BotTask:
 
 
 class BotRooms(LiveRooms):
-    """Opt-in, one-room practice service; at most one CPU inference in flight."""
+    """Mixed tables; optional practice defaults, one CPU inference in flight."""
 
-    def __init__(self, worker, model=None, *, compute_ms=500.0, think_seconds=0.4, **kwargs):
+    def __init__(self, worker, model=None, *, compute_ms=500.0, think_seconds=0.4, practice=True, **kwargs):
         super().__init__(**kwargs)
         _check(10 <= compute_ms <= 1000, "Bot 计算预算须为 10 到 1000 ms")
         self.worker, self.model, self.compute_ms = worker, model, compute_ms
         self.think_seconds = think_seconds
+        self.practice = practice
         self.bots: dict[str, BotMember] = {}
         self.drivers = {}
         self.task = None
-        self.gate = (None, 0.0)
+        self.gates = {}
+        self.last_scheduled_room = None
         self.counts = Counter()
 
     def _models(self):
@@ -81,7 +83,7 @@ class BotRooms(LiveRooms):
     def _add_bot(self, room, profile):
         self._check_profile(profile)
         _check(len(room.members) < 10 and sum(b.room_id == room.room_id for b in self.bots.values()) < 3,
-               "试玩房间最多三位 Bot，总人数最多十人")
+               "每个房间最多三位 Bot，总人数最多十人")
         number = 1
         while (any(b.room_id == room.room_id and b.number == number for b in self.bots.values())
                or any(m.name.casefold() == f"Bot {number} · {PROFILES[profile]}".casefold() for m in room.members.values())):
@@ -90,6 +92,8 @@ class BotRooms(LiveRooms):
         self.bots[mid] = BotMember(room.room_id, number, profile, secrets.randbits(32))
         self.presence[mid] = Presence()
         room.members[mid] = Member(mid, f"Bot {number} · {PROFILES[profile]}")
+        if not self.practice and None in room.seats:
+            room.seats[room.seats.index(None)] = mid
         room.revision += 1
         return mid
 
@@ -101,6 +105,9 @@ class BotRooms(LiveRooms):
         for rid in list(self.drivers):
             if rid not in self.rooms:
                 self.drivers.pop(rid)
+        for rid in list(self.gates):
+            if rid not in self.rooms:
+                self.gates.pop(rid)
 
     def _finish(self, task, result, now):
         room = self.rooms.get(task.room_id)
@@ -149,7 +156,10 @@ class BotRooms(LiveRooms):
                     self._finish(task, {"error": True, "status": "compute_timeout"}, timestamp)
                 if self.task is not None:
                     return
-            for room in self.rooms.values():
+            rooms = list(self.rooms.values())
+            previous = next((i for i, room in enumerate(rooms) if room.room_id == self.last_scheduled_room), -1)
+            rooms = rooms[previous + 1:] + rooms[:previous + 1]
+            for room in rooms:
                 if room.phase != RoomPhase.PLAYING or room.recovery_pending:
                     continue
                 driver = self.drivers[room.room_id]
@@ -157,9 +167,9 @@ class BotRooms(LiveRooms):
                 if not eligible:
                     continue
                 key = (room.game.round_id, window_key(room.game))
-                if self.gate[0] != key:
-                    self.gate = (key, timestamp + self.think_seconds)
-                if timestamp < self.gate[1]:
+                if self.gates.get(room.room_id, (None,))[0] != key:
+                    self.gates[room.room_id] = (key, timestamp + self.think_seconds)
+                if timestamp < self.gates[room.room_id][1]:
                     continue
                 pid = eligible[0]
                 mid = room.round_members[room.game.get_player(pid).seat]
@@ -167,12 +177,13 @@ class BotRooms(LiveRooms):
                 remaining = timer.remaining_seconds(timestamp) if timer else None
                 budget = min(self.compute_ms / 1000, max(0.0, remaining - 0.03)) if remaining is not None else self.compute_ms / 1000
                 if budget <= 0:
-                    return
+                    continue
                 deadline = timestamp + budget
                 try:
                     request = driver.prepare(pid, now=timestamp, context=DecisionContext(budget * 1000, deadline, remaining * 1000 if remaining is not None else None))
                 except DecisionError:
-                    return
+                    continue
+                self.last_scheduled_room = room.room_id
                 task = BotTask(room.room_id, driver, request, mid, deadline)
                 if len(request.legal_actions) == 1:
                     self._finish(task, {"action_id": request.legal_actions[0].action_id, "status": "forced"}, timestamp)
@@ -188,7 +199,9 @@ class BotRooms(LiveRooms):
     def dispatch(self, token, command, *, now=None):
         timestamp = self._now(now)
         # Only validated, between-round host requests may restart a disabled worker.
-        if command.get("type") == "start" and not self.worker.ready:
+        seats = command.get("seats")
+        has_bots = type(seats) is list and any(type(mid) is str and mid in self.bots for mid in seats)
+        if command.get("type") == "start" and has_bots and not self.worker.ready:
             with self.lock:
                 client = self.client(token)
                 room = self.rooms.get(client.room_id)
@@ -232,7 +245,7 @@ class BotRooms(LiveRooms):
                 while len(room.seen_commands) > 2048:
                     room.seen_commands.popitem(last=False)
                 return self.view(token, now=timestamp)
-            if kind == "create":
+            if kind == "create" and self.practice:
                 _check(not self.rooms, "低占用试玩服务一次只开一个房间")
             if kind == "start" and type(command.get("seats")) is list:
                 for mid in command["seats"]:
@@ -241,10 +254,12 @@ class BotRooms(LiveRooms):
             super().dispatch(token, command, now=timestamp)
             client = self.client(token)
             room = self.rooms.get(client.room_id)
-            if kind == "create" and room:
+            if kind == "create" and room and self.practice:
                 use_rl = profile_states(self._models())["rl-fast"]["available"]
                 mids = [self._add_bot(room, ("rl-" if use_rl else "") + p) for p in ("fast", "big", "defensive")]
                 room.seats = [client.member_id, *mids]
+            elif kind == "create" and room:
+                room.seats[0] = client.member_id
             self._cleanup()
             return self.view(token, now=timestamp)
 
@@ -256,13 +271,15 @@ class BotRooms(LiveRooms):
             client.sequence, client.signature = sequence, signature
             models = self._models()
             rl = models.get("rl", {})
-            packet["bot_play"] = {
+            packet["bot_settings"] = {
                 "enabled": True, "profiles": PROFILES, "worker_ready": self.worker.ready,
                 "profile_groups": GROUPS, "profile_states": profile_states(models), "models": models,
                 "compute_ms": self.compute_ms, "model": {"sha256": rl["sha256"],
                     "source_name": rl["source_name"], "iteration": rl.get("iteration"), "cpu_only": True} if rl.get("available") else None,
                 "decisions": dict(self.counts) if packet["room"] and packet["room"]["phase"] in {"REVIEWING", "ARRANGING"} else {},
             }
+            if self.practice:
+                packet["bot_play"] = packet["bot_settings"]
             if packet["room"]:
                 for member in packet["room"]["members"]:
                     bot = self.bots.get(member["member_id"])

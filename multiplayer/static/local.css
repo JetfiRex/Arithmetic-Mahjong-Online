@@ -31,7 +31,9 @@
 .local-seats label { display: flex; flex-direction: column; gap: 8px; font-size: 12px; min-width: 0; }
 .bot-settings { padding: 16px 0; border-bottom: 1px solid #dfe5df; }
 .bot-settings h3 { font-size: 14px; margin: 0; }
-.bot-profile-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(110px, 150px); align-items: center; gap: 12px; padding: 8px 0; font-size: 12px; overflow-wrap: anywhere; }
+.bot-profile-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(100px, 150px) auto; align-items: center; gap: 8px; padding: 8px 0; font-size: 12px; overflow-wrap: anywhere; }
+.bot-add-profile { display: flex; align-items: center; gap: 10px; margin: 12px 0; font-size: 12px; }
+.bot-add-profile select { min-width: 0; flex: 1; padding: 8px; font: inherit; }
 .bot-profile-row select { min-width: 0; width: 100%; padding: 8px; font: inherit; color: #293d34; background: white; border: 1px solid #cdd7d2; border-radius: 4px; }
 .bot-model-list { display: grid; gap: 4px; margin-bottom: 12px; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .bot-model-list .unavailable { color: var(--muted); }

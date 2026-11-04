@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir -r multiplayer/requirements.txt \
 COPY calculator_base/ /app/calculator_base/
 COPY fan_calculator/ /app/fan_calculator/
 COPY simulator/ /app/simulator/
+COPY bots/ /app/bots/
 COPY multiplayer/ /app/multiplayer/
 COPY UI/static/ /app/UI/static/
 COPY pictures/ /app/pictures/
