@@ -63,7 +63,7 @@ function ui() {
 }
 function viewerId() { return localRoom ? state.viewer_player_id : "p0"; }
 function me() {
-  const player = state.players.find((p) => p.player_id === viewerId()) || state.players[0];
+  const player = state.players.find((p) => p.player_id === viewerId()) || state.players[state.viewer_seat ?? 0];
   return { hand_tile_records: [], hand_groups: [], loose_tile_ids: [], ...player };
 }
 function stage() { return ui().stage; }

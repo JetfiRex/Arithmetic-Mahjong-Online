@@ -56,6 +56,7 @@ class LocalClient:
     notice: str = ""
     sequence: int = 0
     signature: str = ""
+    recovery_code: str = field(default_factory=lambda: secrets.token_urlsafe(18))
 
 
 @dataclass
@@ -63,6 +64,8 @@ class Member:
     member_id: str
     name: str
     spectator_mode: str = "public"
+    spectator_seat: int = 0
+    is_bot: bool = False
 
 
 @dataclass
@@ -170,8 +173,9 @@ class LocalRooms:
                     room = existing
                     digest = hashlib.pbkdf2_hmac("sha256", password.encode(), room.salt, 600000)
                     _check(hmac.compare_digest(digest, room.password_hash), "房间名或密码不正确")
-                    _check(len(room.members) < 10, "房间最多容纳 10 人")
-                    _check(all(member.name.casefold() != username.casefold() for member in room.members.values()), "房间内已有人使用这个用户名")
+                    _check(sum(not member.is_bot for member in room.members.values()) < 10, "房间最多容纳 10 位真人，Bot 不占人数")
+                    _check(all(member.name.casefold() != username.casefold() for member in room.members.values()),
+                           "房间内已有人使用这个用户名；返回原页面，或用个人恢复码找回身份")
                 room.members[client.member_id] = Member(client.member_id, username)
                 client.room_id, client.notice = room.room_id, ""
                 room.revision += 1
@@ -272,9 +276,12 @@ class LocalRooms:
                         room.revision += 1
             elif kind == "spectate":
                 _check(not active or member.member_id not in room.round_members, "本局参赛者不能切换上帝视角")
-                mode = command.get("mode")
+                mode = command.get("mode", member.spectator_mode)
                 _check(mode in {"public", "god"}, "未知的观战视角")
+                seat = command.get("seat", member.spectator_seat)
+                _check(type(seat) is int and 0 <= seat < 4, "请选择有效的观战座位")
                 member.spectator_mode = mode
+                member.spectator_seat = seat
                 room.revision += 1
             else:
                 _check(active and member.member_id in room.round_members, "只有本局参赛者可以操作自己的牌")
@@ -381,9 +388,11 @@ class LocalRooms:
                 stage = "WAITING_OTHER"
             result.update(
                 session_id=client.member_id, server_instance_id=self.instance_id, viewer_player_id=pid,
-                viewer_seat=None if pid is None else game.get_player(pid).seat,
+                viewer_seat=game.get_player(pid).seat if pid is not None else member.spectator_seat if member and started else None,
                 hand_revision=room.hand_revisions.get(pid, 0) if room else 0,
                 server_now=timestamp, notice=client.notice,
+                identity={"member_id": client.member_id, "recovery_code": client.recovery_code,
+                          "username": member.name if member else "", "room_name": room.name if room else ""},
                 room=None if room is None else {
                     "room_id": room.room_id, "name": room.name, "host_id": room.host_id,
                     "revision": room.revision, "seats": list(room.seats),
@@ -392,7 +401,11 @@ class LocalRooms:
                         and ended and game.round_result is not None
                         and game.round_id in room.wall_records and room.wall_records[game.round_id].valid,
                     "round_members": list(room.round_members), "is_host": room.host_id == client.member_id,
-                    "members": [{"member_id": person.member_id, "name": person.name, "spectator_mode": person.spectator_mode} for person in room.members.values()],
+                    "members": [{"member_id": person.member_id, "name": person.name, "spectator_mode": person.spectator_mode,
+                                 "is_bot": person.is_bot} for person in room.members.values()],
+                    "human_count": sum(not person.is_bot for person in room.members.values()),
+                    "bot_count": sum(person.is_bot for person in room.members.values()), "human_limit": 10,
+                    "spectator_seat": member.spectator_seat,
                     "spectator_mode": member.spectator_mode, "allow_multiple_hu": room.allow_multiple_hu,
                     "mode": room.mode.value,
                 },

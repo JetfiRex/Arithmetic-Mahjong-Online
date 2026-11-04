@@ -6,15 +6,21 @@
 .entry-art img { width: 60px; height: 60px; object-fit: contain; }
 .entry-art h1 { font-size: 24px; margin: 0; }
 .entry-tabs { margin-bottom: 22px; width: 100%; }
-.entry-tabs button { width: 50%; padding: 10px; font-size: 14px; }
+.entry-tabs button { flex: 1; padding: 10px; font-size: 14px; }
 #entry-form > label { display: flex; flex-direction: column; gap: 7px; margin-bottom: 17px; font-size: 13px; }
 #entry-form input, .local-seat-select { border: 1px solid #cdd7d2; background: white; border-radius: 4px; padding: 10px; color: #293d34; min-width: 0; width: 100%; }
 #entry-form > .primary-button { width: 100%; justify-content: center; }
+#entry-form > label[hidden] { display: none; }
+.identity-code-label { display: grid; gap: 8px; margin: 18px 0; font-size: 13px; }
+.identity-code-label input { min-width: 0; width: 100%; padding: 10px; font: inherit; }
+#identity-saved { display: grid; gap: 8px; }
+.spectator-seat-control { display: grid; gap: 8px; width: 100%; font-size: 12px; }
+.spectator-seat-control select { min-width: 0; width: 100%; padding: 9px; font: inherit; }
 #invite-form > label { display: flex; flex-direction: column; gap: 7px; margin: 20px 0; font-size: 13px; }
 #invite-form input { border: 1px solid #cdd7d2; background: white; border-radius: 4px; padding: 10px; width: 100%; }
 #invite-form > p { font-size: 13px; }
 #invite-form > .primary-button { width: 100%; justify-content: center; }
-.room-panel { padding: 24px 20px; }
+.room-panel { padding: 24px 20px; min-height: 0; overflow-y: auto; flex: 1; }
 .room-panel h2 { font-size: 16px; margin: 0; }
 .room-name { color: #7b8980; font-size: 12px; overflow-wrap: anywhere; }
 .room-member { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #dfe5df; padding: 14px 0; gap: 8px; min-height: 65px; }

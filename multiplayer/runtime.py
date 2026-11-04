@@ -1,13 +1,16 @@
 """Ephemeral hosting runtime: socket handoff, table pauses and disconnect fallback."""
 
 from dataclasses import dataclass, field
+import hashlib
+import hmac
 import json
 import math
+import secrets
 import time
 from uuid import uuid4
 
 from multiplayer.autopilot import discard_drawn_tile, pass_response
-from multiplayer.rooms import LocalRooms, RoomPhase, _check
+from multiplayer.rooms import LocalRooms, RoomPhase, _check, _name
 from simulator import GamePhase
 from simulator.state_snapshot import shift_game_clock
 
@@ -60,6 +63,36 @@ class LiveRooms(LocalRooms):
             token = super().new_client()
             self.presence[self.client(token).member_id] = Presence(disconnected_at=self._now(now))
             return token
+
+    def recover_client(self, token, *, room_name, username, recovery_code, now=None):
+        """Reclaim the existing member, rotate credentials and fence old sockets."""
+        with self.lock:
+            timestamp = self._now(now)
+            self.tick(now=timestamp)
+            visitor = self.client(token)
+            _check(visitor.room_id is None, "请先离开当前房间，再找回身份")
+            name, username = _name(room_name), _name(username, maximum=24)
+            _check(type(recovery_code) is str and 1 <= len(recovery_code) <= 128, "请填写个人恢复码")
+            room = next((r for r in self.rooms.values() if r.name.casefold() == name.casefold()), None)
+            member = next((m for m in room.members.values() if not m.is_bot and m.name.casefold() == username.casefold()), None) if room else None
+            entry = next(((key, client) for key, client in self.clients.items()
+                          if member and client.member_id == member.member_id and client.room_id == room.room_id), None)
+            expected = entry[1].recovery_code if entry else "invalid-recovery-code"
+            matches = hmac.compare_digest(hashlib.sha256(recovery_code.encode()).digest(), hashlib.sha256(expected.encode()).digest())
+            _check(entry is not None and matches, "房间、用户名或恢复码不正确，或原房间已关闭")
+            old_key, original = entry
+            self.clients.pop(hashlib.sha256(token.encode()).hexdigest())
+            self.presence.pop(visitor.member_id, None)
+            self.clients.pop(old_key)
+            replacement = secrets.token_urlsafe(32)
+            self.clients[hashlib.sha256(replacement.encode()).hexdigest()] = original
+            original.recovery_code = secrets.token_urlsafe(18)
+            presence = self.presence[original.member_id]
+            presence.connections.clear()
+            presence.disconnected_at = timestamp
+            original.notice = "已找回原身份，请保存新的个人恢复码"
+            room.revision += 1
+            return replacement
 
     @staticmethod
     def _now(now):
@@ -301,13 +334,14 @@ class LiveRooms(LocalRooms):
             room = self.rooms.get(client.room_id)
             table = self.tables.get(client.room_id)
             kind = command.get("type")
-            _check(self.outage_started_at is None or (room and kind == "leave" and client.member_id == room.host_id), "服务连接恢复中，请等原成员返回")
+            view_only = kind == "spectate"
+            _check(view_only or self.outage_started_at is None or (room and kind == "leave" and client.member_id == room.host_id), "服务连接恢复中，请等原成员返回")
             if room:
                 if table and client.member_id in table.seats:
                     control = table.seats[client.member_id]
                     _check(command.get("control_epoch") == control.epoch, "控制权已变化，请重新操作")
                     _check(not control.autopilot or room.phase != RoomPhase.PLAYING or kind in {"leave"}, "本局已由系统托管，下一局才能恢复真人控制")
-                _check(not room.recovery_pending or (kind == "leave" and client.member_id == room.host_id), "全桌暂停，正在等待玩家重连")
+                _check(view_only or not room.recovery_pending or (kind == "leave" and client.member_id == room.host_id), "全桌暂停，正在等待玩家重连")
             if kind == "start":
                 seats = command.get("seats")
                 if type(seats) is list and all(type(mid) is str and mid in self.presence for mid in seats):

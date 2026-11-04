@@ -38,7 +38,7 @@ def _serve(pipe, exports):
     try:
         paths, models = {}, {}
         # Load every configured family before a live clock, sharing read-only caches.
-        for kind in ("rl", "nn", "cfr", "acfr"):
+        for kind in ("rl", "nn", "cfr"):
             descriptor = exports.get(kind)
             models[kind] = {"available": False, "error": "未配置冻结模型"}
             if descriptor is None:
@@ -199,26 +199,46 @@ class PolicyWorker:
 class OnDemandPolicyWorker:
     """Human-only games need no child process or model dependencies."""
 
-    def __init__(self):
+    def __init__(self, *, models=None, model_info=None):
         self.worker = None
         self.lock = RLock()
+        self.models = models or {}
+        self.model_info = model_info or {}
+        self.startup_error = False
+
+    @property
+    def has_models(self):
+        return bool(self.models)
 
     @property
     def ready(self):
-        return self.worker is not None and self.worker.ready
+        return (self.worker is not None and self.worker.ready and self.worker.process is not None
+                and self.worker.process.is_alive())
 
     @property
     def info(self):
-        return self.worker.info if self.worker is not None else {"models": {
-            kind: {"available": False, "error": "联机服务未配置训练模型"}
-            for kind in ("nn", "rl", "cfr", "acfr")}}
+        if self.startup_error:
+            return {"models": {kind: {"available": False, "error": "模型进程启动失败"} for kind in ("nn", "rl", "cfr")}}
+        if self.worker is not None:
+            result = {**self.worker.info, "models": dict(self.worker.info.get("models", {}))}
+            for kind, info in self.model_info.items():
+                if kind not in self.models:
+                    result["models"][kind] = info
+            return result
+        return {"models": {kind: self.model_info.get(kind, {"available": False, "error": "未配置模型"})
+                           for kind in ("nn", "rl", "cfr")}}
 
     def restart(self):
         with self.lock:
             if self.ready:
                 return
             if self.worker is None:
-                self.worker = PolicyWorker(models={})
+                try:
+                    self.worker = PolicyWorker(models=self.models)
+                    self.startup_error = False
+                except (OSError, ValueError):
+                    self.startup_error = True
+                    raise
             else:
                 self.worker.restart()
 

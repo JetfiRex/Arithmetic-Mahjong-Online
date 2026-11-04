@@ -36,6 +36,7 @@ dist/
 *.jpg
 *.csv
 *.gz
+!multiplayer/models/cfr-policy.json.gz
 *.tar
 *.7z
 *.zip

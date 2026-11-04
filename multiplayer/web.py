@@ -16,6 +16,7 @@ from multiplayer.rooms import RoomError
 from multiplayer.hosting import load_config
 from multiplayer.bot_rooms import BotRooms
 from multiplayer.bot_worker import OnDemandPolicyWorker
+from multiplayer.model_bundle import load_bundle
 from multiplayer.security import IngressMiddleware, RateLimits, WebSettings
 
 
@@ -27,13 +28,22 @@ TILE_NAMES = {f"{i}.png" for i in range(21)} | {"24.png", "plus.png", "mult.png"
 ASSETS = {"icons.svg", "tile-back.svg", "LICENSE-lucide.txt"}
 
 
+def online_rooms(**kwargs):
+    models, info = load_bundle()
+    return BotRooms(OnDemandPolicyWorker(models=models, model_info=info), practice=False, **kwargs)
+
+
 def create_app(*, settings=None, runtime=None):
     settings = settings or WebSettings(("http://127.0.0.1:8771", "http://localhost:8771"))
-    rooms = runtime or BotRooms(OnDemandPolicyWorker(), practice=False)
+    rooms = runtime or online_rooms()
     limits = RateLimits()
 
     @asynccontextmanager
     async def lifespan(app):
+        prepare = getattr(rooms, "prepare", None)
+        if callable(prepare):
+            await run_in_threadpool(prepare)
+        app.state.last_tick_at = time.monotonic()
         stop = Event()
 
         def advance():
@@ -119,7 +129,24 @@ def create_app(*, settings=None, runtime=None):
         token = token_from(request)
         with rooms.lock:
             rooms.tick()
-            return rooms.view(token)
+            try:
+                return rooms.view(token)
+            except RoomError:
+                raise HTTPException(401, "身份已切换或失效，请重新进入") from None
+
+    @app.post("/api/local/recover")
+    async def recover(request: Request):
+        healthy()
+        token = token_from(request)
+        body = await body_from(request)
+        if not limits.take("recoveries", rate=1, burst=8):
+            raise HTTPException(429, "找回尝试过快，请稍后重试")
+        try:
+            replacement = await run_in_threadpool(rooms.recover_client, token, room_name=body.get("room_name"),
+                                                username=body.get("username"), recovery_code=body.get("recovery_code"))
+        except RoomError as exc:
+            raise HTTPException(400, str(exc)) from None
+        return {"token": replacement, "server_instance_id": rooms.instance_id}
 
     @app.post("/api/local/action")
     async def action(request: Request):
@@ -135,7 +162,11 @@ def create_app(*, settings=None, runtime=None):
             return {"state": result}
         except (ValueError, KeyError, TypeError) as exc:
             message = str(exc) if isinstance(exc, ValueError) else "操作参数不正确"
-            return JSONResponse({"error": message, "state": rooms.view(token)}, status_code=400)
+            try:
+                current = rooms.view(token)
+            except RoomError:
+                raise HTTPException(401, "身份已切换或失效，请重新进入") from None
+            return JSONResponse({"error": message, "state": current}, status_code=400)
 
     @app.get("/api/local/wall-record")
     def wall(request: Request):
@@ -175,7 +206,14 @@ def create_app(*, settings=None, runtime=None):
             # Transport ping/pong is handled by Uvicorn, including background tabs.
             # Application data never carries game commands over this channel.
             while True:
-                raw = await socket.receive_text()
+                try:
+                    raw = await asyncio.wait_for(socket.receive_text(), timeout=5)
+                except TimeoutError:
+                    with rooms.lock:
+                        client = rooms.client(token)
+                        if connection not in rooms.presence[client.member_id].connections:
+                            raise RoomError("连接已失效")
+                    continue
                 if raw != "ping" or not limits.take((connection, "ws"), rate=0.5, burst=3):
                     await socket.close(code=1008)
                     return
@@ -216,7 +254,7 @@ def create_app(*, settings=None, runtime=None):
 
 def main():
     config = load_config()
-    app = create_app(settings=config.web, runtime=BotRooms(OnDemandPolicyWorker(), practice=False,
+    app = create_app(settings=config.web, runtime=online_rooms(
         disconnect_seconds=config.disconnect_seconds, grace_seconds=config.grace_seconds,
         session_ttl_seconds=config.session_ttl_seconds))
     print(f"Opening: {config.web.origins[-1]}", flush=True)

@@ -4,7 +4,8 @@ import argparse
 from pathlib import Path
 
 from multiplayer.bot_worker import PolicyWorker, lower_own_priority
-from multiplayer.play_model import freeze_model, freeze_export, recalled_rl, remember_rl
+from multiplayer.play_model import freeze_model, freeze_export
+from multiplayer.model_bundle import load_bundle
 from multiplayer.bot_rooms import BotRooms
 from multiplayer.security import WebSettings
 from multiplayer.web import create_app
@@ -13,10 +14,10 @@ from multiplayer.web import create_app
 def main():
     parser = argparse.ArgumentParser(description="CPU 人机试玩：冻结已发布模型，不干预训练。仅本机。")
     parser.add_argument("--port", type=int, default=8772)
-    parser.add_argument("--model", type=Path, help="显式选择/更新 RL；省略时沿用上次冻结副本，不追随训练")
-    parser.add_argument("--nn-model", type=Path, default=Path(".data/models/p4-v1/policy.npz"))
-    parser.add_argument("--cfr-model", type=Path, default=Path(".data/models/cfr-mahjong/policy.json.gz"))
-    parser.add_argument("--acfr-model", type=Path, default=Path(".data/models/cfr-abstract-v1/policy.json.gz"))
+    parser.add_argument("--model", type=Path, help="显式选择 RL 导出；默认使用部署包第 68 轮")
+    parser.add_argument("--nn-model", type=Path, help="显式选择 NN 导出；默认使用部署包")
+    parser.add_argument("--cfr-model", "--acfr-model", dest="cfr_model", type=Path,
+                        help="CFR 平均策略（抽象版）；默认使用部署包")
     parser.add_argument("--no-models", action="store_true", help="只启用无需模型的策略，不读取任何模型")
     parser.add_argument("--compute-ms", type=float, default=500)
     args = parser.parse_args()
@@ -28,28 +29,20 @@ def main():
     models = {}
     try:
         if not args.no_models:
+            models, _ = load_bundle()
             if args.model is not None:
-                rl = freeze_model(args.model)
-            else:
+                models["rl"] = freeze_model(args.model)
+            for kind, path in (("nn", args.nn_model), ("cfr", args.cfr_model)):
                 try:
-                    rl = recalled_rl()
-                except (OSError, ValueError):
-                    rl = None
-                    print("Saved RL copy unavailable; RL disabled, no automatic model update.", flush=True)
-            if rl is not None:
-                models["rl"] = rl
-            for kind, path in (("nn", args.nn_model), ("cfr", args.cfr_model), ("acfr", args.acfr_model)):
-                try:
-                    if path.exists():
+                    if path is not None:
                         models[kind] = freeze_export(path)
                 except (OSError, ValueError):
+                    models.pop(kind, None)
                     print(f"{kind}: model copy unavailable; this family will be disabled.", flush=True)
         worker = PolicyWorker(models=models)
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
     try:
-        if worker.info["models"]["rl"]["available"]:
-            remember_rl(models["rl"])
         rooms = BotRooms(worker, compute_ms=args.compute_ms)
         settings = WebSettings((f"http://127.0.0.1:{args.port}", f"http://localhost:{args.port}"))
         app = create_app(settings=settings, runtime=rooms)

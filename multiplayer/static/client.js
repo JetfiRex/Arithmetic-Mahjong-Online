@@ -1,8 +1,20 @@
 "use strict";
 
 // Same-origin HTTP/WS transport; the board renderer is shared with local practice.
+function savedMahjongIdentities() {
+  try {
+    const values = JSON.parse(localStorage.getItem("mahjong-saved-identities") || "[]");
+    return Array.isArray(values) ? values.filter((v) => v && typeof v.token === "string" && typeof v.member_id === "string").slice(0, 12) : [];
+  } catch { return []; }
+}
+
+function storeMahjongIdentities(values) {
+  try { localStorage.setItem("mahjong-saved-identities", JSON.stringify(values.slice(0, 12))); } catch { /* Private mode may disallow storage. */ }
+}
+
+const mahjongNewPlayer = new URLSearchParams(location.search).has("new");
 window.localMultiplayer = {
-  token: sessionStorage.getItem("mahjong-local-token"),
+  token: mahjongNewPlayer ? null : sessionStorage.getItem("mahjong-local-token") || savedMahjongIdentities()[0]?.token,
   entryMode: "create",
   initialized: false,
   lastNotice: "",
@@ -19,6 +31,50 @@ window.localMultiplayer = {
   connectionShownFor: null,
   inviteRequired: false,
   inviteInitialized: false,
+
+  rememberIdentity() {
+    sessionStorage.setItem("mahjong-local-token", this.token);
+    const identity = state.identity;
+    if (!identity || !state.room) return;
+    const values = savedMahjongIdentities();
+    const existing = values.find((v) => v.member_id === identity.member_id && v.server_instance_id === state.server_instance_id);
+    if (existing?.token === this.token && existing.room_name === identity.room_name && existing.username === identity.username
+        && existing.recovery_code === identity.recovery_code) return;
+    storeMahjongIdentities([{...identity, token: this.token, server_instance_id: state.server_instance_id},
+      ...values.filter((v) => v.member_id !== identity.member_id)]);
+  },
+
+  useIdentity(token) {
+    const saved = savedMahjongIdentities(), chosen = saved.find((value) => value.token === token);
+    if (chosen) storeMahjongIdentities([chosen, ...saved.filter((value) => value.token !== token)]);
+    this.token = token; sessionStorage.setItem("mahjong-local-token", token);
+    this.connectionId = null; this.retryAt = 0;
+    if (this.socket) { this.socket.close(); this.socket = null; }
+    state = null;
+  },
+
+  openIdentity() {
+    const identity = state?.identity;
+    $("identity-summary").textContent = identity?.room_name ? `${identity.username} · ${identity.room_name}` : "当前还未加入房间";
+    $("identity-code").value = identity?.recovery_code || "";
+    const list = $("identity-saved"); list.replaceChildren();
+    for (const saved of savedMahjongIdentities()) {
+      const button = element("button", "secondary-button", `${saved.username} · ${saved.room_name}`); button.type = "button";
+      button.onclick = () => { this.useIdentity(saved.token); $("identity-dialog").close(); poll(); };
+      list.append(button);
+    }
+    if (!$("identity-dialog").open) $("identity-dialog").showModal();
+  },
+
+  async recoverIdentity(values) {
+    const response = await fetch("/api/local/recover", {
+      method: "POST", headers: {"Content-Type": "application/json", Authorization: `Bearer ${this.token}`},
+      body: JSON.stringify(values),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "找回失败");
+    this.useIdentity(result.token);
+  },
 
   async createSession(inviteCode) {
     const response = await fetch("/api/local/session", {
@@ -91,12 +147,18 @@ window.localMultiplayer = {
       if (this.inviteRequired) throw new Error("等待输入邀请码");
       await this.createSession();
     }
-    const response = await fetch("/api/local/state", { headers: { Authorization: `Bearer ${this.token}` }, cache: "no-store" });
+    const token = this.token;
+    const response = await fetch("/api/local/state", { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
+    if (token !== this.token) throw new Error("身份已切换");
     if (response.status === 401) {
-      this.token = null; sessionStorage.removeItem("mahjong-local-token");
+      const saved = savedMahjongIdentities();
+      const replacement = saved.find((v) => v.member_id === state?.session_id && v.token !== token);
+      storeMahjongIdentities(saved.filter((v) => v.token !== token));
+      this.token = replacement?.token || null;
+      sessionStorage.removeItem("mahjong-local-token");
       this.connectionId = null;
       if (this.socket) { this.socket.close(); this.socket = null; }
-      if (state?.network?.enabled) toast("服务器已重新开服或身份已失效，请重新创建或加入房间");
+      if (state?.network?.enabled) toast("身份已过期或服务已重启；原房间仍在时，可用个人恢复码找回");
     }
     return response;
   },
@@ -127,15 +189,21 @@ window.localMultiplayer = {
     stack.replaceWith(wallButton); wallButton.append(stack); wallButton.onclick = () => this.openWallReview();
     document.title = "算术麻将 · 联机牌桌";
     const tools = document.querySelector(".header-tools");
+    const identityButton = element("button", "tool-button", "我的身份"); identityButton.id = "local-identity";
+    identityButton.onclick = () => this.openIdentity(); tools.prepend(identityButton);
+    $("identity-copy").onclick = async () => {
+      try { await navigator.clipboard.writeText($("identity-code").value); toast("个人恢复码已复制，请私下保存"); }
+      catch { $("identity-code").select(); toast("请手动复制个人恢复码"); }
+    };
     const settlements = element("button", "tool-button", "胡牌记录"); settlements.id = "local-settlements";
     settlements.hidden = true; settlements.onclick = showResult; tools.prepend(settlements);
     const resultWall = element("button", "secondary-button", "查看牌山");
     resultWall.id = "result-wall-review"; resultWall.type = "button"; resultWall.hidden = true;
     resultWall.onclick = () => { $("result-dialog").close(); this.openWallReview(); };
     $("next-round-button").before(resultWall);
-    const newWindow = element("button", "tool-button", "新测试窗口");
-    newWindow.id = "local-new-window"; newWindow.prepend(icon("plus")); newWindow.title = "打开独立身份的本地测试窗口";
-    newWindow.onclick = () => window.open("/", "_blank", "noopener"); tools.prepend(newWindow);
+    const newWindow = element("button", "tool-button", "新玩家窗口");
+    newWindow.id = "local-new-window"; newWindow.prepend(icon("plus")); newWindow.title = "打开独立的新玩家身份";
+    newWindow.onclick = () => window.open("/?new=1", "_blank", "noopener"); tools.prepend(newWindow);
     $("developer-toggle").title = "房间成员"; $("developer-toggle").setAttribute("aria-label", "打开房间成员");
     $("developer-panel").setAttribute("aria-label", "房间成员");
     const panel = element("section", "room-panel"); panel.id = "room-panel";
@@ -145,13 +213,27 @@ window.localMultiplayer = {
     close.onclick = () => $("developer-panel").classList.remove("open"); heading.append(close);
     panel.append(heading, element("p", "room-name"), element("div", "room-roster"), element("div", "room-controls"));
     $("developer-panel").append(panel);
-    for (const mode of ["create", "join"]) $(`${mode}-tab`).onclick = () => {
+    for (const mode of ["create", "join", "recover"]) $(`${mode}-tab`).onclick = () => {
       this.entryMode = mode; $("entry-error").textContent = "";
       $("create-tab").classList.toggle("active", mode === "create"); $("join-tab").classList.toggle("active", mode === "join");
-      $("entry-submit").textContent = mode === "create" ? "创建房间" : "加入房间";
+      $("recover-tab").classList.toggle("active", mode === "recover");
+      $("local-password-label").hidden = mode === "recover"; $("local-password").required = mode !== "recover";
+      $("local-recovery-label").hidden = mode !== "recover"; $("local-recovery-code").required = mode === "recover";
+      $("entry-submit").textContent = mode === "create" ? "创建房间" : mode === "join" ? "加入房间" : "找回原身份";
     };
     $("entry-form").onsubmit = async (event) => {
       event.preventDefault(); $("entry-error").textContent = "";
+      if (this.entryMode === "recover") {
+        if (busy) return;
+        busy = true;
+        try {
+          await this.recoverIdentity({room_name: $("local-room-name").value, username: $("local-username").value,
+            recovery_code: $("local-recovery-code").value.trim()});
+          $("local-recovery-code").value = "";
+        } catch (error) { $("entry-error").textContent = error.message; }
+        finally { busy = false; poll(); }
+        return;
+      }
       await send(this.entryMode, { username: $("local-username").value, room_name: $("local-room-name").value, password: $("local-password").value });
       if (!state.room) $("entry-error").textContent = $("toast").textContent;
       else $("local-password").value = "";
@@ -293,7 +375,8 @@ window.localMultiplayer = {
     $("local-start").disabled = active || state.room.members.length < 4;
     $("local-start").firstChild.textContent = ui().started ? "确认开局 " : "开始本局 ";
     $("local-settings-title").textContent = state.room.phase === "ARRANGING" ? "安排下一局" : "房主设置";
-    $("local-settings-status").textContent = active ? "本局座位和配置已锁定；结束后可在下一局修改" : `${state.room.members.length} / 10 人 · 座位、模式、一炮多响和计时将在确认开局时生效`;
+    $("local-settings-status").textContent = active ? "本局座位和配置已锁定；结束后可在下一局修改"
+      : `${state.room.human_count} / ${state.room.human_limit} 人 · ${state.room.bot_count} Bot · 确认开局后设置生效`;
     this.syncTimers();
     this.renderBotSettings();
     if (!$("local-settings").open) $("local-settings").showModal();
@@ -303,13 +386,14 @@ window.localMultiplayer = {
     const config = state.bot_settings || state.bot_play;
     $("bot-settings").hidden = !config;
     if (!config || !state.room) return;
-    $("bot-model-status").textContent = state.bot_play
+    const degraded = state.room.phase === "PLAYING" && !config.worker_ready && state.room.members.some((m) => m.is_bot);
+    $("bot-model-status").textContent = degraded ? "Bot 计算进程不可用，本局使用保底动作；下一局可重新准备。" : state.bot_play
       ? `CPU · ${config.compute_ms} ms${config.worker_ready ? "" : " · 本局保底"}`
       : "朋友与 Bot 可以混合入座，开局后锁定本局配置。";
     const modelList = $("bot-model-list"); modelList.replaceChildren();
-    for (const [kind, model] of Object.entries(state.bot_play ? config.models || {} : {})) {
+    for (const [kind, model] of Object.entries(config.models || {})) {
       const label = config.profile_groups[kind];
-      const status = model.available ? `${model.iteration == null ? "冻结" : `第 ${model.iteration} 轮`} · ${model.sha256.slice(0, 12)}` : model.error || "未配置模型";
+      const status = model.available ? `模型可用${model.iteration == null ? "" : ` · 第 ${model.iteration} 轮`}` : model.error || "未配置模型";
       modelList.append(element("div", model.available ? "" : "unavailable", `${label} · ${status}`));
     }
     const root = $("bot-profile-list"); root.replaceChildren();
@@ -344,7 +428,7 @@ window.localMultiplayer = {
     }
     addProfile.value = [...addProfile.options].some((o) => o.value === previous) ? previous : "win-random";
     addProfile.disabled = locked;
-    $("bot-add").disabled = locked || bots.length >= 3 || state.room.members.length >= 10;
+    $("bot-add").disabled = locked || bots.length >= 3;
   },
 
   syncTimers() {
@@ -412,6 +496,7 @@ window.localMultiplayer = {
 
   render() {
     if (!this.initialized) this.initialize();
+    this.rememberIdentity();
     this.ensureSocket();
     const room = state.room;
     const key = room ? `${room.room_id}:${state.round_id}:${room.phase}` : null;
@@ -458,7 +543,7 @@ window.localMultiplayer = {
     if (state.notice && state.notice !== this.lastNotice) { this.lastNotice = state.notice; toast(state.notice); }
     if (!room) { if ($("local-settings").open) $("local-settings").close(); if ($("result-dialog").open) $("result-dialog").close(); return; }
     if ($("local-settings").open) this.renderBotSettings();
-    const panel = $("room-panel"); panel.querySelector(".room-name").textContent = `${room.name} · ${room.members.length} / 10${room.persistent ? " · 自动存档" : ""}`;
+    const panel = $("room-panel"); panel.querySelector(".room-name").textContent = `${room.name} · ${room.human_count} / ${room.human_limit} 人${room.bot_count ? ` · ${room.bot_count} Bot` : ""}${room.persistent ? " · 自动存档" : ""}`;
     const roster = panel.querySelector(".room-roster"); roster.replaceChildren();
     const active = room.phase === "PLAYING";
     if ($("local-settings").open && this.settingsRevision !== room.revision) {
@@ -481,7 +566,7 @@ window.localMultiplayer = {
       const row = element("div", "room-member"); row.dataset.memberId = member.member_id;
       const seat = (active ? room.round_members : room.seats).indexOf(member.member_id);
       const name = element("div", "member-name", `${member.name}${member.member_id === state.session_id ? "（我）" : ""}`);
-      name.append(element("small", "", [member.member_id === room.host_id ? "房主" : "", seat >= 0 ? `座位 ${seat + 1}` : member.spectator_mode === "god" ? "上帝观战" : "公共观战", member.is_bot ? "Bot" : member.autopilot ? "系统托管" : ({ online: "在线", reconnecting: "等待重连", offline: "连接中断" })[member.connection_status]].filter(Boolean).join(" · ")));
+      name.append(element("small", "", [member.member_id === room.host_id ? "房主" : "", seat >= 0 ? `座位 ${seat + 1}` : member.is_bot ? "候场" : member.spectator_mode === "god" ? "上帝观战" : "公共观战", member.is_bot ? "Bot" : member.autopilot ? "系统托管" : ({ online: "在线", reconnecting: "等待重连", offline: "连接中断" })[member.connection_status]].filter(Boolean).join(" · ")));
       row.append(name);
       if (room.is_host && member.member_id !== room.host_id) {
         const kick = element("button", "icon-button"); kick.title = `移出 ${member.name}`; kick.setAttribute("aria-label", kick.title); kick.append(icon("x")); kick.disabled = active && seat >= 0;
@@ -495,10 +580,17 @@ window.localMultiplayer = {
       const modes = element("div", "segmented"); modes.setAttribute("aria-label", "观战视角");
       for (const [value, label] of [["public", "公共视角"], ["god", "上帝视角"]]) {
         const button = element("button", room.spectator_mode === value ? "active" : "", label);
-        button.disabled = !!ui().recovery_pending;
         button.onclick = () => send("spectate", { mode: value }); modes.append(button);
       }
       controls.append(modes);
+      const viewpoint = element("label", "spectator-seat-control", "观察座位");
+      const select = element("select"); select.setAttribute("aria-label", "观察座位");
+      for (const player of state.players) {
+        const option = element("option", "", `座位 ${player.seat + 1} · ${player.name}`); option.value = String(player.seat); select.append(option);
+      }
+      select.value = String(room.spectator_seat ?? 0);
+      select.onchange = () => send("spectate", { seat: Number(select.value) });
+      viewpoint.append(select); controls.append(viewpoint);
     }
     if (room.is_host) {
       const settings = element("button", "secondary-button", ui().recovery_pending ? "恢复房间" : room.phase === "REVIEWING" ? "下一局" : room.phase === "ARRANGING" ? "安排下一局" : "房主设置");

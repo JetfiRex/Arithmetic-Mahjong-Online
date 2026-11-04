@@ -3,6 +3,7 @@
 from collections import Counter
 from dataclasses import dataclass
 import json
+import logging
 import math
 import secrets
 import time
@@ -51,6 +52,16 @@ class BotRooms(LiveRooms):
         self.last_scheduled_room = None
         self.counts = Counter()
 
+    def prepare(self):
+        if getattr(self.worker, "has_models", False):
+            try:
+                self.worker.restart()
+            except (OSError, ValueError):
+                logging.getLogger(__name__).warning("Bot model worker unavailable; model policies disabled")
+        for kind, info in self._models().items():
+            if not info.get("available"):
+                logging.getLogger(__name__).warning("Bot model %s unavailable: %s", kind, info.get("error", "未配置模型"))
+
     def _models(self):
         return self.worker.info.get("models", {"rl": {"available": self.model is not None,
             "sha256": self.model.sha256 if self.model else None,
@@ -82,8 +93,8 @@ class BotRooms(LiveRooms):
 
     def _add_bot(self, room, profile):
         self._check_profile(profile)
-        _check(len(room.members) < 10 and sum(b.room_id == room.room_id for b in self.bots.values()) < 3,
-               "每个房间最多三位 Bot，总人数最多十人")
+        _check(sum(b.room_id == room.room_id for b in self.bots.values()) < 3,
+               "每个房间最多三位 Bot，Bot 不占真人名额")
         number = 1
         while (any(b.room_id == room.room_id and b.number == number for b in self.bots.values())
                or any(m.name.casefold() == f"Bot {number} · {PROFILES[profile]}".casefold() for m in room.members.values())):
@@ -91,7 +102,7 @@ class BotRooms(LiveRooms):
         mid = str(uuid4())
         self.bots[mid] = BotMember(room.room_id, number, profile, secrets.randbits(32))
         self.presence[mid] = Presence()
-        room.members[mid] = Member(mid, f"Bot {number} · {PROFILES[profile]}")
+        room.members[mid] = Member(mid, f"Bot {number} · {PROFILES[profile]}", is_bot=True)
         if not self.practice and None in room.seats:
             room.seats[room.seats.index(None)] = mid
         room.revision += 1
