@@ -9,6 +9,13 @@ from simulator.game_state import GameStateError
 
 
 DEFAULT_TIMEOUTS = TimeoutConfig(5, 5, 30, 5)
+DEFAULT_HAND_PREPARATION_SECONDS = 30
+
+
+def parse_hand_preparation_seconds(value: Any) -> float:
+    if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 600:
+        raise GameStateError("理牌时间须为 0 到 600 秒，0 表示跳过")
+    return value
 
 
 def parse_timeouts(values: Any) -> TimeoutConfig:

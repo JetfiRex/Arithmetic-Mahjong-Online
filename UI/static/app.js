@@ -3,7 +3,7 @@
 const $ = (id) => document.getElementById(id);
 const localRoom = window.localMultiplayer || null;
 const LABEL = { CHI: "吃", PENG: "碰", MING_GANG: "杠", AN_GANG: "暗杠", JIA_GANG: "加杠", HU: "胡", PASS: "过" };
-const STAGES = { LOBBY: "等待开局", BOT_TURN: "其他玩家出牌回合", READY_SOURCE: "等待来牌", OWN_TURN: "我的出牌回合", WAITING_DRAW: "等待摸牌", WAITING_RESPONSE: "来牌响应", WAITING_ACTION_DETAIL: "选择吃法", WAITING_ROB_KONG: "等待其他玩家响应", ROUND_ENDED: "本局结束" };
+const STAGES = { LOBBY: "等待开局", HAND_PREPARATION: "开局理牌", BOT_TURN: "其他玩家出牌回合", READY_SOURCE: "等待来牌", OWN_TURN: "我的出牌回合", WAITING_DRAW: "等待摸牌", WAITING_RESPONSE: "来牌响应", WAITING_ACTION_DETAIL: "选择吃法", WAITING_ROB_KONG: "等待其他玩家响应", ROUND_ENDED: "本局结束" };
 const TIMER_FIELDS = [
   ["discard_response_seconds", "t1", "吃碰杠胡响应", 5],
   ["action_detail_seconds", "t2", "选择吃法", 5],
@@ -11,11 +11,15 @@ const TIMER_FIELDS = [
   ["rob_kong_seconds", "t4", "抢杠响应", 5],
 ];
 const VALUES = [...Array(21).keys(), 24, "+", "×"];
-let state, busy = false, polling = false, numberView = false, grouping = false;
-let selected = null, groupSelection = new Set(), chiSelection = new Set();
+let state, busy = false, polling = false, numberView = false;
+let selected = null, chiSelection = new Set();
 let deckSelection = null, dragging = null, editorKind = null, shownResult = null;
 let receivedAt = 0, toastTimer, lastWindow = null;
-let settingsKey = null, setupShownFor = null, layoutKey = null, chiWindowKey = null, dragClickUntil = 0;
+let settingsKey = null, setupShownFor = null, chiWindowKey = null, dragClickUntil = 0;
+let handLayout = null, handRenderOwner = null, handMeldNode = null, handRow = null;
+let meldRenderKey = null, meldRenderRoot = null, renderedStateKey = null;
+let dropIndicator = null, dropPreview = null, suppressedDragClick = null;
+const handTiles = new Map();
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -59,27 +63,125 @@ function toast(message) {
 function ui() {
   const value = state.ui || state.practice;
   return localRoom && state.network?.enabled && (!localRoom.connectionId || value.autopilot)
-    ? { ...value, grouping_allowed: false, editing_allowed: false } : value;
+    ? { ...value, sorting_allowed: false, editing_allowed: false } : value;
 }
 function viewerId() { return localRoom ? state.viewer_player_id : "p0"; }
 function me() {
-  const player = state.players.find((p) => p.player_id === viewerId()) || state.players[state.viewer_seat ?? 0];
-  return { hand_tile_records: [], hand_groups: [], loose_tile_ids: [], ...player };
+  const player = rawMe();
+  if (!handLayout || handLayout.owner !== layoutOwner()) return player;
+  const records = new Map(player.hand_tile_records.map(t => [t.tile_id, t]));
+  const ordered = layoutOrder().map(id => records.get(id)).filter(Boolean);
+  return {...player, hand_tile_records: ordered, hand_tiles: ordered.map(t => t.value)};
 }
 function stage() { return ui().stage; }
 function manualChi() { return state.pending_action_detail?.selection_mode === "manual"; }
 
+function rawMe(snapshot = state) {
+  const id = localRoom ? snapshot.viewer_player_id : "p0";
+  const player = snapshot.players.find(p => p.player_id === id) || snapshot.players[snapshot.viewer_seat ?? 0];
+  return {hand_tile_records: [], ...player};
+}
+
+function layoutOwner(snapshot = state) {
+  if (localRoom && !snapshot.viewer_player_id) return null;
+  return `${snapshot.server_instance_id}:${snapshot.session_id}:${snapshot.round_id}:${localRoom ? snapshot.viewer_player_id : "p0"}`;
+}
+
+function layoutOrder(layout = handLayout) {
+  return layout ? [...layout.order] : [];
+}
+
+function reconcileLayout(next) {
+  const owner = layoutOwner(next);
+  if (!owner) { handLayout = null; return; }
+  const ids = rawMe(next).hand_tile_records.map(t => t.tile_id), valid = new Set(ids);
+  if (handLayout?.owner !== owner) {
+    handLayout = {owner, order: ids, version: 0};
+    return;
+  }
+  const order = handLayout.order.filter(id => valid.has(id));
+  const placed = new Set(order);
+  order.push(...ids.filter(id => !placed.has(id)));
+  if (order.length !== handLayout.order.length || order.some((id,i) => id !== handLayout.order[i])) {
+    handLayout.order = order;
+    handLayout.version++;
+  }
+}
+
+function handContentSignature(player) {
+  return JSON.stringify(player.hand_tile_records.map(t => [t.tile_id, t.value]).sort((a,b) => a[0].localeCompare(b[0])));
+}
+
+function moveHand(data) {
+  if (!state || !handLayout || !ui().sorting_allowed || ui().recovery_pending || ui().autopilot || me().is_out) return false;
+  const order = layoutOrder();
+  const from = order.indexOf(data.tile_id);
+  if (from < 0 || !Number.isInteger(data.index) || data.index < 0 || data.index >= order.length) return false;
+  order.splice(from, 1);
+  order.splice(data.index, 0, data.tile_id);
+  handLayout.order = order;
+  handLayout.version++;
+  renderHand(); renderActions();
+  return true;
+}
+
+function selectLocalTiles(required) {
+  const remaining = new Map();
+  for (const value of required) remaining.set(value, (remaining.get(value) || 0) + 1);
+  const chosen = [];
+  for (const {tile_id, value} of me().hand_tile_records) {
+    if ((remaining.get(value) || 0) > 0) {
+      chosen.push(tile_id);
+      remaining.set(value, remaining.get(value) - 1);
+    }
+  }
+  if (chosen.length !== required.length) throw new Error("动作所需手牌已变化");
+  return chosen;
+}
+
+function prepareAction(type, data) {
+  const result = {...data};
+  if (type === "discard" && handLayout) {
+    const order = layoutOrder(), authority = rawMe().hand_tile_records.map(t => t.tile_id);
+    if (order.some((id,i) => id !== authority[i])) result.hand_order = order;
+  } else if (type === "response" && ["PENG", "MING_GANG"].includes(data.action)) {
+    const option = state.response_window?.options_by_player[viewerId()]?.find(o => o.action_type === data.action);
+    const required = option?.payload_options[0]?.hand_tiles;
+    if (!required) throw new Error("响应窗口已变化");
+    result.selected_tile_ids = selectLocalTiles(required);
+  } else if (type === "turn_action" && ["AN_GANG", "JIA_GANG"].includes(data.action)) {
+    const option = state.turn_options_by_player[viewerId()]?.find(o => o.action_type === data.action);
+    const payload = option?.payload_options.find(p => p.option_id === data.option_id);
+    if (!payload) throw new Error("杠牌窗口已变化");
+    result.selected_tile_ids = selectLocalTiles(payload.required_values);
+  } else if (type === "chi" && data.option_id != null) {
+    const option = state.pending_action_detail?.payload_options.find(p => p.option_id === data.option_id);
+    if (!option) throw new Error("吃牌窗口已变化");
+    result.selected_tile_ids = selectLocalTiles(option.required_values);
+  } else if (type === "chi" && data.tile_ids) {
+    result.selected_tile_ids = [...data.tile_ids];
+    delete result.tile_ids;
+  }
+  return result;
+}
+
 // Every mutation carries both the snapshot revision and the relevant action window.
 async function send(type, data = {}) {
+  if (type === "move") return moveHand(data);
   if (busy || !state) return false;
   busy = true;
   document.body.classList.add("working");
   try {
-    const response = localRoom ? await localRoom.send(type, data) : await fetch("/api/action", {
+    data = prepareAction(type, data);
+    renderActions();
+    const pending = localRoom ? localRoom.send(type, data) : fetch("/api/action", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ type, revision: state.revision, turn_window_id: state.turn_window_id, ...data }),
     });
+    const token = localRoom?.token, generation = localRoom?.identityGeneration;
+    const response = await pending;
     const result = await response.json();
+    if (localRoom && (token !== localRoom.token || generation !== localRoom.identityGeneration)) return false;
     if (result.state) accept(result.state);
     if (!response.ok) throw new Error(result.error || "操作失败");
     return true;
@@ -90,17 +192,20 @@ async function send(type, data = {}) {
   } finally {
     busy = false;
     document.body.classList.remove("working");
+    if (state) renderActions();
   }
 }
 
 async function poll() {
-  if (busy || polling) return;
+  if (polling) return;
   polling = true;
   try {
     const response = localRoom ? await localRoom.poll() : await fetch("/api/state", { cache: "no-store" });
     if (!response.ok) throw new Error("离线");
+    const token = localRoom?.token, generation = localRoom?.identityGeneration;
     const next = await response.json();
-    if (!busy) accept(next);
+    if (localRoom && (token !== localRoom.token || generation !== localRoom.identityGeneration)) return;
+    accept(next);
     $("connection-dot").classList.remove("offline");
   } catch {
     $("connection-dot").classList.add("offline");
@@ -113,16 +218,17 @@ function accept(next) {
   if (dragging?.kind === "hand") {
     const player = next.players.find((p) => p.player_id === (localRoom ? next.viewer_player_id : "p0"));
     const nextUI = next.ui || next.practice;
-    if (dragging.owner !== `${next.server_instance_id}:${next.session_id}:${next.round_id}`
-        || (localRoom && dragging.handRevision !== next.hand_revision)
-        || dragging.signature !== handLayoutSignature(player)
-        || !nextUI.grouping_allowed || nextUI.recovery_pending || nextUI.autopilot || player?.is_out) endDrag(false);
+    if (dragging.owner !== layoutOwner(next)
+        || dragging.signature !== handContentSignature(player)
+        || !nextUI.sorting_allowed || nextUI.recovery_pending || nextUI.autopilot || player?.is_out) endDrag(false);
   }
   if (localRoom && state?.round_id !== next.round_id && $("result-dialog").open) $("result-dialog").close();
   const changed = !state || next.revision !== state.revision;
+  reconcileLayout(next);
   state = next;
   receivedAt = performance.now();
-  if (changed) {
+  const stateKey = `${layoutOwner()}:${state.viewer_seat}:${state.revision}`;
+  if (changed || renderedStateKey !== stateKey) {
     if ((next.ui || next.practice).recovery_pending) { selected = null; chiSelection.clear(); }
     const window = `${state.round_id}:${state.phase === "WAITING_TURN_ACTION" ? state.turn_window_id : ""}`;
     if (lastWindow !== window) {
@@ -132,25 +238,21 @@ function accept(next) {
     const detail = state.pending_action_detail;
     const nextChiKey = detail?.player_id === viewerId() ? `${state.round_id}:${detail.detail_id}` : null;
     if (chiWindowKey !== nextChiKey) { chiSelection.clear(); chiWindowKey = nextChiKey; }
-    const nextLayoutKey = `${state.server_instance_id}:${state.session_id}:${state.round_id}`;
-    if (layoutKey !== nextLayoutKey) {
-      groupSelection.clear(); grouping = false; layoutKey = nextLayoutKey;
-    }
-    if (!ui().grouping_allowed) { groupSelection.clear(); grouping = false; }
     const ids = new Set(me().hand_tile_records.map((t) => t.tile_id));
     if (!ids.has(selected)) selected = null;
-    groupSelection = new Set([...groupSelection].filter((id) => ids.has(id)));
     chiSelection = new Set([...chiSelection].filter((id) => ids.has(id)));
     render();
+    renderedStateKey = stateKey;
   }
   renderTimer();
 }
 
 function render() {
   const practice = ui();
-  if (dragging?.kind === "hand" && (!practice.grouping_allowed || practice.recovery_pending || me().is_out)) endDrag(false);
+  if (dragging?.kind === "hand" && (!practice.sorting_allowed || practice.recovery_pending || me().is_out)) endDrag(false);
   $("round-label").textContent = practice.started === false ? "等待开局" : practice.mode === "four" ? `第 ${practice.round_number} 局` : `第 ${practice.round_number} 次试牌`;
   $("clock-label").textContent = practice.timeout_settings ? Object.values(practice.timeout_settings).some((v) => v !== null) ? "计时已开启" : "不计时" : practice.scene === "timer" ? "计时体验" : "无计时";
+  if (state.config?.fast_mode) $("clock-label").textContent += " · 快速模式";
   $("mode-label").textContent = practice.mode === "four" ? "四人开发者局" : "单人试牌";
   $("table-mode").replaceChildren(document.createTextNode(practice.mode === "four" ? "FOUR PLAYERS" : "SOLITAIRE"), element("span", "", practice.mode === "four" ? "四人开发者局" : "单人试牌台"));
   if (!$("scene-select").options.length) {
@@ -164,8 +266,6 @@ function render() {
   $("wall-counter").textContent = `牌山 ${state.wall.remaining_count}`;
   $("stage-label").textContent = stage() === "BOT_TURN" ? `${state.players[state.current_turn_seat].name} · t3 出牌` : stage() === "WAITING_ROB_KONG" && state.rob_kong_window ? "t4 · 抢杠响应" : STAGES[stage()] || "处理中";
   $("hand-count").textContent = `${me().hand_count} 张`;
-  $("group-mode").disabled = !practice.grouping_allowed;
-  $("group-mode").classList.toggle("active", grouping);
   $("edit-hand").disabled = !practice.editing_allowed;
   $("edit-wall").disabled = !practice.editing_allowed;
   $("deck-add").disabled = !practice.editing_allowed;
@@ -187,138 +287,151 @@ function render() {
   }
 }
 
-function handLayoutSignature(player) {
-  return JSON.stringify([player?.hand_tile_records, player?.hand_groups, player?.loose_tile_ids]);
+function placeHandNodes(parent, nodes) {
+  const keep = new Set(nodes);
+  nodes.forEach((node, index) => {
+    if (parent.children[index] !== node) parent.insertBefore(node, parent.children[index] || null);
+  });
+  for (const child of [...parent.children]) if (!keep.has(child)) child.remove();
+}
+
+function dragGeometry() {
+  if (!dragging || dragging.kind !== "hand") return null;
+  if (!dragging.geometry) {
+    const zone = handRow, bounds = zone.getBoundingClientRect();
+    const nodes = [...zone.querySelectorAll("[data-tile-id]")].filter(n => n.dataset.tileId !== dragging.id);
+    const targets = nodes.map(node => {
+      const rect = node.getBoundingClientRect();
+      return {mid: (rect.left + rect.right) / 2, left: node.offsetLeft - 3};
+    });
+    const last = nodes.at(-1);
+    dragging.geometry = {zone, bounds, targets, end: last ? last.offsetLeft + last.offsetWidth + 2 : 2};
+  }
+  return dragging.geometry;
+}
+
+function handDropTarget(event, fresh = false) {
+  if (fresh && dragging) dragging.geometry = null;
+  const area = dragGeometry();
+  if (!area || event.clientX < area.bounds.left) return null;
+  let index = area.targets.findIndex(t => event.clientX < t.mid);
+  if (index < 0) index = area.targets.length;
+  return {zone: area.zone, index, left: area.targets[index]?.left ?? area.end};
+}
+
+function previewHandDrop(event) {
+  if (dragging?.kind !== "hand" || !ui().sorting_allowed) return;
+  event.preventDefault();
+  const target = handDropTarget(event);
+  if (!target) { clearDrop(); return; }
+  if (dropPreview?.zone === target.zone && dropPreview.index === target.index && dropPreview.left === target.left) return;
+  if (dropPreview?.zone !== target.zone) dropPreview?.zone.classList.remove("drop-active");
+  if (!dropIndicator) { dropIndicator = element("span", "drop-slot"); dropIndicator.style.left = "0"; }
+  target.zone.classList.add("drop-active");
+  dropIndicator.style.transform = `translateX(${target.left}px)`;
+  if (dropIndicator.parentNode !== target.zone) target.zone.append(dropIndicator);
+  dropPreview = target;
+}
+
+function commitHandDrop(event) {
+  if (dragging?.kind !== "hand" || !ui().sorting_allowed) return;
+  event.preventDefault();
+  if (dragging.owner !== layoutOwner() || dragging.layoutVersion !== handLayout?.version) { endDrag(); return; }
+  const target = handDropTarget(event, true), id = dragging.id;
+  endDrag(false);
+  if (target) moveHand({tile_id: id, index: target.index});
+  else renderHand();
+}
+
+function handTileNode(id, value) {
+  let node = handTiles.get(id);
+  if (node) return node;
+  node = tile(value, true); node.dataset.tileId = id; node.title = `${value}`;
+  node.onpointerdown = () => { suppressedDragClick = null; };
+  node.onclick = () => {
+    if (suppressedDragClick === id && performance.now() < dragClickUntil) { suppressedDragClick = null; return; }
+    suppressedDragClick = null;
+    if (ui().recovery_pending || ui().autopilot || me().is_out) return;
+    else if (manualChi()) {
+      if (chiSelection.has(id)) chiSelection.delete(id);
+      else if (chiSelection.size < 3) chiSelection.add(id);
+      else toast("最多选择 3 张牌");
+    } else if (stage() === "OWN_TURN") selected = selected === id ? null : id;
+    renderHand(); renderMelds(); renderActions();
+  };
+  node.ondragstart = event => {
+    if (!ui().sorting_allowed) { event.preventDefault(); return; }
+    dragging = {kind: "hand", id, node, owner: layoutOwner(), layoutVersion: handLayout.version,
+      signature: handContentSignature(rawMe()), geometry: null};
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", id);
+    node.classList.add("dragging");
+  };
+  node.ondragend = () => endDrag();
+  handTiles.set(id, node);
+  return node;
 }
 
 function renderHand() {
-  // Keep the dragged DOM node mounted while authority updates other controls.
   if (dragging?.kind === "hand") return;
+  const root = $("hand-regions"), player = me();
   if (localRoom && !viewerId()) {
-    const root = $("hand-regions"); root.replaceChildren();
-    root.append(element("div", "meld-area")); root.firstChild.id = "meld-area";
+    handRenderOwner = null;
+    root.replaceChildren();
+    const meldArea = element("div", "meld-area"); meldArea.id = "meld-area"; root.append(meldArea);
     const zone = element("div", "hand-region observer-hand");
-    const player = me();
     for (let i = 0; i < player.hand_count; i++) zone.append(player.observer_tiles ? tile(player.observer_tiles[i]) : element("span", "tile back"));
-    root.append(zone); $("selection-bar").hidden = true;
+    root.append(zone);
     return;
   }
-  const records = new Map(me().hand_tile_records.map((t) => [t.tile_id, t.value]));
-  const regions = [...me().hand_groups.map((g, i) => ({ id: g.group_id, ids: g.tile_ids, label: `第 ${i + 1} 组` })),
-    { id: null, ids: me().loose_tile_ids, label: me().hand_groups.length ? "散牌" : null }];
-  const root = $("hand-regions");
-  const scroll = $("hand-scroll").scrollLeft;
-  root.replaceChildren();
-  const meldArea = element("div", "meld-area"); meldArea.id = "meld-area"; root.append(meldArea);
-  for (const region of regions) {
-    const zone = element("div", "hand-region");
-    if (region.id) zone.dataset.groupId = region.id;
-    else if (!region.ids.length) zone.classList.add("empty-loose");
-    zone.setAttribute("aria-label", region.label || "散牌");
-    if (region.label) {
-      const caption = element("span", "group-caption", region.label);
-      if (region.id) {
-        const disband = element("button"); disband.type = "button";
-        disband.title = "拆除此组"; disband.setAttribute("aria-label", `拆除${region.label}`);
-        disband.disabled = !ui().grouping_allowed;
-        disband.append(icon("x"));
-        disband.onclick = () => send("disband", { group_id: region.id });
-        caption.append(disband);
-      }
-      zone.append(caption);
-    }
-    for (const id of region.ids) {
-      const node = tile(records.get(id), true);
-      node.disabled = !!me().is_out || !!ui().recovery_pending || !!ui().autopilot || !!(state.network?.enabled && !localRoom?.connectionId);
-      node.dataset.tileId = id;
-      node.classList.toggle("selected", selected === id || chiSelection.has(id));
-      node.classList.toggle("group-selected", groupSelection.has(id));
-      node.title = `${records.get(id)}`;
-      node.onclick = () => {
-        if (performance.now() < dragClickUntil) return;
-        if (grouping && ui().grouping_allowed) toggleGroup(id);
-        else if (ui().recovery_pending || ui().autopilot || me().is_out) return;
-        else if (manualChi()) {
-          if (chiSelection.has(id)) chiSelection.delete(id);
-          else if (chiSelection.size < 3) chiSelection.add(id);
-          else toast("最多选择 3 张牌");
-        } else if (stage() === "OWN_TURN") selected = selected === id ? null : id;
-        renderHand(); renderMelds(); renderActions();
-      };
-      node.oncontextmenu = (event) => {
-        event.preventDefault();
-        if (ui().grouping_allowed) { toggleGroup(id); renderHand(); renderMelds(); renderActions(); }
-      };
-      node.draggable = ui().grouping_allowed;
-      node.ondragstart = (event) => {
-        if (!ui().grouping_allowed) { event.preventDefault(); return; }
-        dragging = { kind: "hand", id, handRevision: state.hand_revision,
-          owner: `${state.server_instance_id}:${state.session_id}:${state.round_id}`, signature: handLayoutSignature(me()) };
-        event.dataTransfer.effectAllowed = "move";
-        event.dataTransfer.setData("text/plain", id);
-        node.classList.add("dragging");
-      };
-      node.ondragend = endDrag;
-      zone.append(node);
-    }
-    zone.ondragover = (event) => {
-      if (dragging?.kind !== "hand" || !ui().grouping_allowed) return;
-      event.preventDefault(); clearDrop(); zone.classList.add("drop-active");
-      const targets = [...zone.querySelectorAll("[data-tile-id]")].filter((n) => n.dataset.tileId !== dragging.id);
-      const before = targets.find((n) => event.clientX < n.getBoundingClientRect().left + n.offsetWidth / 2);
-      const indicator = element("span", "drop-slot");
-      indicator.style.left = `${before ? before.offsetLeft - 3 : (targets.at(-1)?.offsetLeft || 0) + (targets.at(-1)?.offsetWidth || 4) + 2}px`;
-      zone.append(indicator);
-    };
-    zone.ondrop = (event) => {
-      if (dragging?.kind !== "hand" || !ui().grouping_allowed) return;
-      event.preventDefault();
-      const targets = [...zone.querySelectorAll("[data-tile-id]")].filter((n) => n.dataset.tileId !== dragging.id);
-      let index = targets.findIndex((n) => event.clientX < n.getBoundingClientRect().left + n.offsetWidth / 2);
-      if (index < 0) index = targets.length;
-      const { id, handRevision } = dragging; endDrag();
-      send("move", { tile_id: id, group_id: region.id, index, ...(localRoom ? { hand_revision: handRevision } : {}) });
-    };
-    root.append(zone);
+  const owner = layoutOwner();
+  if (handRenderOwner !== owner || !handMeldNode || handMeldNode.parentNode !== root) {
+    root.replaceChildren(); handTiles.clear();
+    handMeldNode = element("div", "meld-area"); handMeldNode.id = "meld-area";
+    handRow = element("div", "hand-region");
+    handRow.setAttribute("aria-label", "手牌");
+    handRow.ondragover = event => previewHandDrop(event);
+    handRow.ondrop = event => commitHandDrop(event);
+    handRenderOwner = owner; root.append(handMeldNode, handRow);
+    root.ondragover = event => { if (event.target === root) previewHandDrop(event); };
+    root.ondrop = event => { if (event.target === root) commitHandDrop(event); };
+    $("hand-scroll").onscroll = () => { if (dragging?.kind === "hand") dragging.geometry = null; };
   }
-  // A genuine gutter belongs to whichever neighbouring region edge is nearer.
-  const nearestZone = (x) => {
-    const zones = [...root.querySelectorAll(".hand-region")];
-    if (x < zones[0].getBoundingClientRect().left) return null;
-    return zones.reduce((best, zone) => {
-      const bounds = zone.getBoundingClientRect();
-      const distance = Math.max(bounds.left - x, x - bounds.right, 0);
-      return !best || distance < best.distance ? { zone, distance } : best;
-    }, null)?.zone;
-  };
-  root.ondragover = (event) => { if (event.target === root && dragging?.kind === "hand") nearestZone(event.clientX)?.ondragover(event); };
-  root.ondrop = (event) => { if (event.target === root && dragging?.kind === "hand") nearestZone(event.clientX)?.ondrop(event); };
-  $("hand-scroll").scrollLeft = scroll;
-  $("selection-bar").hidden = groupSelection.size === 0;
-  $("selection-count").textContent = `已选 ${groupSelection.size} 张`;
-  $("confirm-group").disabled = groupSelection.size === 0;
-}
-
-function toggleGroup(id) {
-  selected = null;
-  if (groupSelection.has(id)) groupSelection.delete(id); else groupSelection.add(id);
+  const records = new Map(player.hand_tile_records.map(t => [t.tile_id, t.value]));
+  for (const [id, node] of handTiles) if (!records.has(id)) { node.remove(); handTiles.delete(id); }
+  const scroll = $("hand-scroll").scrollLeft;
+  const nodes = player.hand_tile_records.map(({tile_id, value}) => {
+    const node = handTileNode(tile_id, value);
+    node.disabled = !!player.is_out || !!ui().recovery_pending || !!ui().autopilot || !!(state.network?.enabled && !localRoom?.connectionId);
+    node.draggable = !!ui().sorting_allowed;
+    node.classList.toggle("selected", selected === tile_id || chiSelection.has(tile_id));
+    node.classList.toggle("number-view", numberView);
+    return node;
+  });
+  placeHandNodes(handRow, nodes);
+  if ($("hand-scroll").scrollLeft !== scroll) $("hand-scroll").scrollLeft = scroll;
 }
 
 function clearDrop() {
-  document.querySelectorAll(".drop-slot").forEach((n) => n.remove());
-  document.querySelectorAll(".drop-active,.drop-target").forEach((n) => n.classList.remove("drop-active", "drop-target"));
+  dropPreview?.zone.classList.remove("drop-active");
+  dropIndicator?.remove(); dropPreview = null;
+  if (dragging?.kind === "deck") document.querySelectorAll(".drop-target").forEach(n => n.classList.remove("drop-target"));
 }
+
 function endDrag(redraw = true) {
-  const wasHand = dragging?.kind === "hand";
-  dragging = null; clearDrop(); document.querySelectorAll(".dragging").forEach((n) => n.classList.remove("dragging"));
-  if (wasHand) {
-    dragClickUntil = performance.now() + 250;
+  const previous = dragging;
+  clearDrop(); dragging = null;
+  previous?.node?.classList.remove("dragging");
+  if (previous?.kind === "hand") {
+    suppressedDragClick = previous.id; dragClickUntil = performance.now() + 250;
     if (redraw && state) { renderHand(); renderMelds(); }
   }
 }
 
 function renderMelds() {
-  const root = $("meld-area"); root.replaceChildren();
+  const root = $("meld-area"), key = JSON.stringify([me().melded_groups, numberView]);
+  if (root === meldRenderRoot && key === meldRenderKey) return;
+  root.replaceChildren();
   for (const meld of me().melded_groups) {
     const group = element("div", "meld"); group.title = meld.group_type;
     const faces = meld.display_tiles || meld.tiles.map((value) => ({ value, orientation: "upright" }));
@@ -330,6 +443,7 @@ function renderMelds() {
     }
     root.append(group);
   }
+  meldRenderRoot = root; meldRenderKey = key;
 }
 
 function renderTable() {
@@ -375,7 +489,7 @@ function appendDiscards(root, player) {
 function action(label, handler, className = "", disabled = false, symbol = null) {
   const node = element("button", `action-button ${className}`, label);
   if (symbol) node.append(icon(symbol));
-  node.disabled = disabled; node.onclick = handler; $("actions").append(node);
+  node.disabled = disabled || busy; node.onclick = handler; $("actions").append(node);
 }
 
 function renderActions() {
@@ -395,6 +509,8 @@ function renderActions() {
     action("开局设置", openSettings, "primary", false, "arrow-right");
   } else if (stage() === "BOT_TURN") {
     status.textContent = `${state.players[state.current_turn_seat].name}的回合`;
+  } else if (stage() === "HAND_PREPARATION") {
+    status.textContent = "可以拖牌排序，理牌结束后庄家开始回合";
   } else if (stage() === "READY_SOURCE") {
     status.textContent = "来牌待翻开";
     action("翻牌", () => send("reveal"), "primary", false, "arrow-right");
@@ -417,6 +533,7 @@ function renderActions() {
       status.textContent = `${detail.payload_options.length} 种吃法`;
       for (const option of detail.payload_options) {
         const choice = element("button", "chi-choice");
+        choice.disabled = busy;
         choice.title = `吃 ${option.preview}`; choice.setAttribute("aria-label", choice.title);
         option.display_tiles.forEach((value, index) => {
           const node = tile(value); if (index === option.claimed_display_index) node.classList.add("claimed"); choice.append(node);
@@ -467,7 +584,7 @@ function renderTimer() {
   if (!timer && paused !== null && paused !== undefined) { $("timer").textContent = `${Math.ceil(paused)}s · 暂停`; return; }
   if (!timer) return;
   const seconds = Math.max(0, timer.deadline_at - state.server_now - (performance.now() - receivedAt) / 1000);
-  const name = { RESPONSE_WINDOW: "t1", DETAIL_SELECTION: "t2", TURN_DECISION: "t3", ROB_KONG_RESPONSE: "t4" }[timer.kind];
+  const name = { HAND_PREPARATION: "理牌", RESPONSE_WINDOW: "t1", DETAIL_SELECTION: "t2", TURN_DECISION: "t3", ROB_KONG_RESPONSE: "t4" }[timer.kind];
   $("timer").textContent = `${name} · ${Math.ceil(seconds)}s`;
   $("timer").classList.toggle("urgent", seconds <= 5);
 }
@@ -622,7 +739,7 @@ function renderDeck() {
 
 function renderActivity() {
   const event = state.event_log.at(-1);
-  const labels = { tile_drawn: "已摸牌", tile_discarded: "已出牌", hand_group_created: "已创建分组", hand_group_disbanded: "已拆除分组", hand_tile_moved: "手牌位置已更新", turn_action_passed: "已跳过本次提示", chi_completed: "吃牌完成", peng_completed: "碰牌完成", gang_completed: "杠牌完成", win_settled: "胡牌已结算", round_ended: "本局结束", practice_wall_edited: "牌堆已更新", practice_hand_edited: "手牌已更新", response_window_opened: "来牌响应中", detail_selection_opened: "等待选择吃法" };
+  const labels = { tile_drawn: "已摸牌", tile_discarded: "已出牌", hand_tile_moved: "手牌位置已更新", turn_action_passed: "已跳过本次提示", chi_completed: "吃牌完成", peng_completed: "碰牌完成", gang_completed: "杠牌完成", win_settled: "胡牌已结算", round_ended: "本局结束", practice_wall_edited: "牌堆已更新", practice_hand_edited: "手牌已更新", response_window_opened: "来牌响应中", detail_selection_opened: "等待选择吃法" };
   $("activity-text").textContent = event ? labels[event.event_type] || labels[event.type] || STAGES[stage()] : "等待第一张来牌";
 }
 
@@ -630,7 +747,7 @@ function openEditor(kind) {
   if (!ui().editing_allowed) return;
   editorKind = kind;
   $("editor-title").textContent = kind === "edit_wall" ? "编辑牌堆" : "编辑手牌";
-  $("editor-order").textContent = kind === "edit_wall" ? "摸牌顺序 · 下一张在最前" : "手牌顺序 · 应用后清除原分组";
+  $("editor-order").textContent = kind === "edit_wall" ? "摸牌顺序 · 下一张在最前" : "手牌顺序";
   $("tile-input").value = JSON.stringify(kind === "edit_wall" ? ui().wall_tiles : me().hand_tiles);
   $("editor-error").textContent = "";
   $("editor-dialog").showModal();
@@ -695,6 +812,7 @@ function displayFormula(values) {
   return values;
 }
 
+window.addEventListener?.("resize", () => { if (dragging?.kind === "hand") dragging.geometry = null; });
 $("scene-select").onchange = () => send("scene", { scene: $("scene-select").value });
 function renderRecovery() {
   if (localRoom) { localRoom.renderRecovery(); return; }
@@ -729,9 +847,6 @@ $("setup-form").onsubmit = async (event) => {
 $("reset-game").onclick = () => send("reset", { round_id: state.round_id });
 $("developer-toggle").onclick = () => $("developer-panel").classList.toggle("open");
 $("developer-close").onclick = () => $("developer-panel").classList.remove("open");
-$("group-mode").onclick = () => { grouping = !grouping; selected = null; groupSelection.clear(); render(); };
-$("confirm-group").onclick = async () => { if (await send("group", { tile_ids: [...groupSelection] })) { groupSelection.clear(); grouping = false; render(); } };
-$("clear-selection").onclick = () => { groupSelection.clear(); renderHand(); renderMelds(); };
 $("face-mode").onclick = () => setAppearance(false);
 $("number-mode").onclick = () => setAppearance(true);
 function setAppearance(value) { numberView = value; $("face-mode").classList.toggle("active", !value); $("number-mode").classList.toggle("active", value); render(); }

@@ -32,6 +32,7 @@ window.localMultiplayer = {
   connectionShownFor: null,
   inviteRequired: false,
   inviteInitialized: false,
+  chat: null,
 
   rememberIdentity() {
     sessionStorage.setItem("mahjong-local-token", this.token);
@@ -45,6 +46,7 @@ window.localMultiplayer = {
   },
 
   useIdentity(token) {
+    this.chat?.reset();
     this.identityGeneration++;
     const saved = savedMahjongIdentities(), chosen = saved.find((value) => value.token === token);
     if (chosen) storeMahjongIdentities([chosen, ...saved.filter((value) => value.token !== token)]);
@@ -68,6 +70,7 @@ window.localMultiplayer = {
 
   async createSession(inviteCode) {
     const response = await fetch("/api/local/session", {
+      signal: globalThis.AbortSignal?.timeout?.(10000),
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(inviteCode === undefined ? {} : { invite_code: inviteCode }),
     });
@@ -118,6 +121,7 @@ window.localMultiplayer = {
     socket.onmessage = (event) => {
       if (this.socket !== socket || event.data === "pong") return;
       const message = JSON.parse(event.data);
+      if (message.type?.startsWith("chat_")) { this.chat?.receive(message); return; }
       if (message.ready && message.server_instance_id === state.server_instance_id) {
         this.connectionId = message.connection_id;
         render(); poll();
@@ -139,7 +143,8 @@ window.localMultiplayer = {
     }
     const token = this.token;
     const generation = this.identityGeneration;
-    const response = await fetch("/api/local/state", { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
+    const response = await fetch("/api/local/state", { headers: { Authorization: `Bearer ${token}` }, cache: "no-store",
+      signal: globalThis.AbortSignal?.timeout?.(10000) });
     if (token !== this.token || generation !== this.identityGeneration) throw new Error("身份已切换");
     if (response.status === 401) {
       const saved = savedMahjongIdentities();
@@ -157,6 +162,7 @@ window.localMultiplayer = {
   send(type, data) {
     if (type === "join" || type === "create") this.identityGeneration++;
     return fetch("/api/local/action", {
+      signal: globalThis.AbortSignal?.timeout?.(10000),
       method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.token}` },
       body: JSON.stringify({ type, command_id: crypto.randomUUID(), room_id: state.room?.room_id,
         server_instance_id: state.server_instance_id,
@@ -168,6 +174,7 @@ window.localMultiplayer = {
 
   initialize() {
     this.initialized = true;
+    this.chat = new RoomChatClient(this);
     $("local-rule-mode").onchange = () => {
       $("local-blood-bot-note").hidden = !(state.bot_settings || state.bot_play) || $("local-rule-mode").value !== "blood_battle";
     };
@@ -223,7 +230,7 @@ window.localMultiplayer = {
       document.querySelectorAll(".local-timer-setting").forEach((row) => {
         timeouts[row.dataset.field] = $("local-timers-enabled").checked && row.querySelector("[type=checkbox]").checked ? Number(row.querySelector("[type=number]").value) : null;
       });
-      if (await send("start", { seats: this.seats(), timeouts, mode: $("local-rule-mode").value, allow_multiple_hu: $("local-multiple-hu").checked, room_revision: this.settingsRevision })) $("local-settings").close();
+      if (await send("start", { seats: this.seats(), timeouts, mode: $("local-rule-mode").value, allow_multiple_hu: $("local-multiple-hu").checked, fast_mode: $("local-fast-mode").checked, hand_preparation_seconds: Number($("local-hand-preparation").value), room_revision: this.settingsRevision })) $("local-settings").close();
       else $("local-settings-error").textContent = $("toast").textContent;
     };
   },
@@ -343,6 +350,9 @@ window.localMultiplayer = {
     $("local-timers-enabled").checked = Object.values(ui().timeout_settings).some((value) => value !== null);
     $("local-timers-enabled").disabled = ui().settings_locked;
     $("local-multiple-hu").checked = state.room.allow_multiple_hu; $("local-multiple-hu").disabled = ui().settings_locked;
+    $("local-fast-mode").checked = !!state.room.fast_mode; $("local-fast-mode").disabled = ui().settings_locked;
+    $("local-hand-preparation").value = state.room.hand_preparation_seconds ?? 30;
+    $("local-hand-preparation").disabled = ui().settings_locked;
     $("local-rule-mode").value = state.room.mode || "normal"; $("local-rule-mode").disabled = ui().settings_locked;
     $("local-rule-mode").onchange();
     $("local-save-seats").disabled = active;
@@ -489,6 +499,7 @@ window.localMultiplayer = {
     $("result-wall-review").title = canReview && !room.wall_review_available ? "本局无完整牌序记录" : "查看本局完整牌序";
     $("local-wall-button").setAttribute("aria-label", $("local-wall-button").title);
     $("local-entry").hidden = !!room;
+    this.chat.update(state);
     document.querySelector(".workspace").hidden = !room;
     $("mode-label").textContent = (state.bot_play ? "人机试玩" : state.network?.enabled ? "联机试玩" : "本地多人")
       + (state.config?.mode === "blood_battle" ? " · 血战" : "");
@@ -501,6 +512,7 @@ window.localMultiplayer = {
     $("discard-label").textContent = viewerId() ? "我的弃牌" : `${me().name}的弃牌`;
     $("discard-river").setAttribute("aria-label", $("discard-label").textContent);
     if (stage() === "OBSERVING" || stage() === "WAITING_OTHER") $("stage-label").textContent = `${state.players[state.current_turn_seat].name} · ${visiblePhase() || "等待"}`;
+    if (state.phase === "HAND_PREPARATION") $("stage-label").textContent = "开局理牌";
     if (stage() === "WON") $("stage-label").textContent = `已胡牌 · 第 ${me().win_order} 位`;
     const settlements = $("local-settlements"), count = state.settlement_events?.length || 0;
     settlements.hidden = state.config?.mode !== "blood_battle" || !count;

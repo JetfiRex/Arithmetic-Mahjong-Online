@@ -1,3 +1,23 @@
+<section id="room-chat" class="room-chat" hidden aria-label="房间聊天">
+  <section id="room-chat-panel" class="chat-panel" aria-labelledby="room-chat-title" hidden>
+    <header class="chat-heading">
+      <div><h2 id="room-chat-title">房间聊天</h2><span id="room-chat-room"></span></div>
+      <button id="room-chat-close" class="icon-button" type="button" title="收起聊天" aria-label="收起聊天"><svg class="icon"><use href="/assets/icons.svg#x"></use></svg></button>
+    </header>
+    <p id="room-chat-status" class="chat-status">连接中…</p>
+    <p id="room-chat-empty" class="chat-empty">和同桌打个招呼吧 🌿</p>
+    <ol id="room-chat-messages" class="chat-messages" role="log" aria-label="聊天消息" aria-live="off" aria-relevant="additions"></ol>
+    <form id="room-chat-form" class="chat-form">
+      <label class="chat-input-label" for="room-chat-input">聊天消息</label>
+      <textarea id="room-chat-input" rows="2" maxlength="600" placeholder="和同桌聊两句…" aria-describedby="room-chat-error"></textarea>
+      <p id="room-chat-error" class="chat-error" role="status"></p>
+      <div class="chat-compose-footer"><span id="room-chat-count">0/300</span><button id="room-chat-retry" type="button" class="text-button" hidden>重试同步</button><button id="room-chat-send" type="submit" disabled>发送</button></div>
+    </form>
+  </section>
+  <button id="room-chat-toggle" class="chat-toggle" type="button" aria-controls="room-chat-panel" aria-expanded="false" aria-label="房间聊天">
+    <svg class="icon"><use href="/assets/icons.svg#chat"></use></svg><span>聊天</span><span id="room-chat-unread" class="chat-unread" hidden></span>
+  </button>
+</section>
 <section id="invite-entry" class="local-entry" aria-labelledby="invite-title" hidden>
   <div class="entry-art"><img src="/tiles/app_icon.png" alt="算术麻将"><h1 id="invite-title">朋友邀请</h1></div>
   <form id="invite-form">
@@ -37,8 +57,12 @@
       <button type="button" id="bot-add" class="secondary-button" title="添加一位 Bot"><svg class="icon"><use href="/assets/icons.svg#plus"></use></svg>添加 Bot</button>
     </section>
     <div id="local-seats" class="local-seats"></div>
-    <div class="timer-settings-heading"><h3>操作计时</h3><label class="switch-label"><input type="checkbox" id="local-timers-enabled" checked>启用计时</label></div>
+    <div class="timer-settings-heading"><h3>操作计时</h3><label class="switch-label"><input type="checkbox" id="local-timers-enabled" checked>启用操作计时</label></div>
     <div id="local-timer-settings" class="timer-settings"></div>
+    <label class="local-multiple">开局理牌（秒）<input id="local-hand-preparation" type="number" min="0" max="600" step="any" value="30" required aria-label="开局理牌秒数"></label>
+    <p class="setup-status">理牌时间独立于操作计时，结束后庄家摸牌并开始回合；设为 0 秒可跳过。</p>
+    <label class="local-multiple"><input id="local-fast-mode" type="checkbox">快速模式</label>
+    <p class="setup-status">三家都只能过时直接摸牌；否则等待有可选动作的玩家，全部决定后立即裁决。开启 t1 计时后，到期未决定视为过。</p>
     <label class="local-multiple">牌局模式<select id="local-rule-mode"><option value="normal">普通模式 · 一次胡牌结束</option><option value="blood_battle">血战模式 · 三家胡牌或流局结束</option></select></label>
     <p id="local-blood-bot-note" class="setup-status" hidden>血战尚无专用 Bot；数学、搜索、NN/RL 等会使用兼容降级行为。</p>
     <label class="local-multiple"><input id="local-multiple-hu" type="checkbox" checked>允许一炮多响</label>

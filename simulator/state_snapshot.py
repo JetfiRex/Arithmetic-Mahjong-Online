@@ -16,7 +16,7 @@ from simulator.actions import (
 )
 from simulator.config import GameConfig, GameMode
 from simulator.game_state import DiscardRecord, GamePhase, GameState, PlayerState, TileWall
-from simulator.hand_state import HandGroup, HandTile
+from simulator.hand_state import HandTile
 from simulator.rule_adapter import ArithmeticMahjongRuleAdapter, FanItem, WinMethod, WinResult
 from simulator.settlement import (
     BloodBattleScoringAdapter, FinalPlayerState, NormalScoringAdapter, PlayerScore,
@@ -24,9 +24,9 @@ from simulator.settlement import (
 )
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 5
 _RECORDS = {cls.__name__: cls for cls in (
-    GameState, PlayerState, TileWall, DiscardRecord, HandGroup, HandTile,
+    GameState, PlayerState, TileWall, DiscardRecord, HandTile,
     ActionDetailState, ActionOption, ActionRequest, ResolvedAction, ResponseWindow,
     RobKongWindow, TimeoutConfig, TimerState, GameConfig, FanItem, WinResult,
     PlayerScore, FinalPlayerState, RoundResult, ScoreDelta, SettlementEvent,
@@ -141,9 +141,6 @@ def _decode(value: Any, *, adapters: dict[str, Any], depth: int = 0) -> Any:
     for name, item in decoded.items():
         _require(_matches(item, hints[name]), f"Invalid field type: {cls.__name__}.{name}")
     kwargs = {name: item for name, item in decoded.items() if field_map[name].init}
-    if cls is PlayerState:
-        # Its normal constructor intentionally clears groups for a newly dealt hand.
-        kwargs.pop("hand_groups")
     if cls is GameState:
         kwargs.update(adapters)
     result = cls(**kwargs)
@@ -241,12 +238,6 @@ def validate_game_state(game: GameState) -> None:
         _require(all(player.hand_tile_ids) and not all_hand_ids.intersection(player.hand_tile_ids), "Duplicate/empty tile identity")
         _require(len(set(player.hand_tile_ids)) == len(player.hand_tile_ids), "Duplicate hand tile identity")
         all_hand_ids.update(player.hand_tile_ids)
-        grouped = [tile_id for group in player.hand_groups for tile_id in group.tile_ids]
-        _require(len(grouped) == len(set(grouped)) and set(grouped) <= set(player.hand_tile_ids), "Broken group membership")
-        _require(all(group.tile_ids and group.group_id for group in player.hand_groups), "Empty hand group")
-        _require(len({group.group_id for group in player.hand_groups}) == len(player.hand_groups), "Duplicate group ID")
-        expected = grouped + [tile_id for tile_id in player.hand_tile_ids if tile_id not in set(grouped)]
-        _require(expected == player.hand_tile_ids, "Hand/group order is inconsistent")
         for meld in player.melded_groups:
             _require(type(meld.get("tiles")) is list, "Invalid meld")
             tiles(meld["tiles"])
@@ -292,6 +283,7 @@ def validate_game_state(game: GameState) -> None:
         _require(duration is None or (_number(duration) and duration > 0), "Invalid timeout configuration")
     if game.active_timer is not None:
         expected_kind = {
+            GamePhase.HAND_PREPARATION: TimerKind.HAND_PREPARATION,
             GamePhase.WAITING_RESPONSE: TimerKind.RESPONSE_WINDOW,
             GamePhase.WAITING_ACTION_DETAIL: TimerKind.DETAIL_SELECTION,
             GamePhase.WAITING_TURN_ACTION: TimerKind.TURN_DECISION,
@@ -302,6 +294,11 @@ def validate_game_state(game: GameState) -> None:
         _require(all(_number(value) for value in (timer.started_at, timer.deadline_at, timer.timeout_seconds)) and timer.timeout_seconds > 0, "Invalid timer")
         window = game.response_window or game.pending_action_detail or game.rob_kong_window
         _require(window is None or timer.deadline_at == window.deadline_at, "Timer/window deadline mismatch")
+    if game.phase == GamePhase.HAND_PREPARATION:
+        _require(game.active_timer is not None and game.config.hand_preparation_seconds > 0,
+                 "Missing hand preparation timer")
+        _require(game.drawn_tile_id is None and game.turn_window_id is None and not game.turn_options_by_player,
+                 "Hand preparation cannot contain turn actions")
     if game.round_result is not None:
         result = game.round_result
         _require(game.phase == GamePhase.ROUND_ENDED and result.round_id == game.round_id, "Invalid round result")
@@ -321,13 +318,13 @@ def validate_game_state(game: GameState) -> None:
     _require(len({event.settlement_id for event in game.settlement_events}) == len(game.settlement_events), "Duplicate settlement identity")
 
 
-def _upgrade_v1(value):
-    """Add only the known blood-battle fields to an ordinary v1 checkpoint."""
+def _upgrade_legacy(value, *, version):
+    """Upgrade v1-v4 fields without adding a delay to an existing round."""
     if isinstance(value, list):
-        return [_upgrade_v1(item) for item in value]
+        return [_upgrade_legacy(item, version=version) for item in value]
     if not isinstance(value, dict):
         return value
-    result = {key: _upgrade_v1(item) for key, item in value.items()}
+    result = {key: _upgrade_legacy(item, version=version) for key, item in value.items()}
     defaults = {
         "GameConfig": {"mode": {"enum": "GameMode", "value": "normal"}},
         "PlayerState": {"is_out": False, "win_order": None, "win_settlement_id": None},
@@ -336,9 +333,14 @@ def _upgrade_v1(value):
                         "remaining_player_ids": {"tuple": []}, "final_player_states": {"tuple": []},
                         "event_log": {"tuple": []}},
     }
-    if result.get("record") in defaults and isinstance(result.get("fields"), dict):
+    if version == 1 and result.get("record") in defaults and isinstance(result.get("fields"), dict):
         for key, item in defaults[result["record"]].items():
             result["fields"].setdefault(key, item)
+    if result.get("record") == "PlayerState" and isinstance(result.get("fields"), dict):
+        result["fields"].pop("hand_groups", None)
+    if result.get("record") == "GameConfig" and isinstance(result.get("fields"), dict):
+        result["fields"].setdefault("fast_mode", False)
+        result["fields"].setdefault("hand_preparation_seconds", 0)
     return result
 
 
@@ -362,11 +364,12 @@ def restore_game_state(
     """Rebuild a checkpoint at a new clock origin without drawing or settling."""
     _require(_number(now), "Invalid restore clock")
     _require(type(snapshot) is dict and set(snapshot) == {"schema_version", "kind", "clock", "adapters", "state"}, "Invalid checkpoint envelope")
-    _require(type(snapshot["schema_version"]) is int and snapshot["schema_version"] in (1, SCHEMA_VERSION), "Unsupported checkpoint schema")
+    _require(type(snapshot["schema_version"]) is int and snapshot["schema_version"] in (1, 2, 3, 4, SCHEMA_VERSION), "Unsupported checkpoint schema")
     _require(snapshot["kind"] == "game-state" and snapshot["clock"] == "relative-v1", "Unsupported checkpoint kind/clock")
     try:
         adapters = _restore_adapters(snapshot["adapters"], rule_adapter, scoring_adapter)
-        state = _upgrade_v1(snapshot["state"]) if snapshot["schema_version"] == 1 else snapshot["state"]
+        state = (_upgrade_legacy(snapshot["state"], version=snapshot["schema_version"])
+                 if snapshot["schema_version"] < SCHEMA_VERSION else snapshot["state"])
         game = _decode(state, adapters=adapters)
         _require(type(game) is GameState, "Checkpoint root is not a GameState")
         validate_game_state(game)

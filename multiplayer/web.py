@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 from threading import Event, Thread
 import time
+import anyio
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -18,6 +19,7 @@ from multiplayer.bot_rooms import BotRooms
 from multiplayer.bot_worker import OnDemandPolicyWorker
 from multiplayer.model_bundle import load_bundle
 from multiplayer.security import IngressMiddleware, RateLimits, WebSettings
+from multiplayer.chat import ChatHub
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +39,7 @@ def create_app(*, settings=None, runtime=None):
     settings = settings or WebSettings(("http://127.0.0.1:8771", "http://localhost:8771"))
     rooms = runtime or online_rooms()
     limits = RateLimits()
+    chat = ChatHub(rooms)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -176,6 +179,7 @@ def create_app(*, settings=None, runtime=None):
         app.state.pending_sockets += 1
         token, connection = None, None
         pending = True
+        peer, tasks = None, []
         try:
             await socket.accept()
             raw = await asyncio.wait_for(socket.receive_text(), timeout=5)
@@ -189,36 +193,71 @@ def create_app(*, settings=None, runtime=None):
             app.state.pending_sockets -= 1
             pending = False
             await socket.send_json({"ready": True, "connection_id": connection, "server_instance_id": rooms.instance_id})
-            # Transport ping/pong is handled by Uvicorn, including background tabs.
-            # Application data never carries game commands over this channel.
-            while True:
-                try:
-                    raw = await asyncio.wait_for(socket.receive_text(), timeout=5)
-                except TimeoutError:
-                    with rooms.lock:
-                        client = rooms.client(token)
-                        if connection not in rooms.presence[client.member_id].connections:
-                            raise RoomError("连接已失效")
-                    continue
-                if raw != "ping" or not limits.take((connection, "ws"), rate=0.5, burst=3):
-                    await socket.close(code=1008)
-                    return
-                await socket.send_text("pong")
+            peer = chat.attach(token, connection)
+
+            async def read_messages():
+                while True:
+                    try:
+                        raw = await asyncio.wait_for(socket.receive_text(), timeout=5)
+                    except TimeoutError:
+                        def connected():
+                            with rooms.lock:
+                                client = rooms.client(token)
+                                if connection not in rooms.presence[client.member_id].connections:
+                                    raise RoomError("连接已失效")
+                        await run_in_threadpool(connected)
+                        continue
+                    if raw == "ping":
+                        if not limits.take((connection, "ws"), rate=0.5, burst=3):
+                            raise RoomError("心跳请求过快")
+                        chat.enqueue(peer, "pong")
+                        continue
+                    # Bound parsing and error replies too. Backpressure keeps a
+                    # chat flood off the event loop without closing presence.
+                    if not chat.limits.take(connection, rate=5, burst=10):
+                        chat.error(peer, "聊天操作太快，请稍等一下")
+                        await asyncio.sleep(0.2)
+                        continue
+                    if len(raw) > 4096:
+                        chat.error(peer, "聊天请求过长")
+                        continue
+                    try:
+                        packet = json.loads(raw)
+                    except (ValueError, RecursionError):
+                        chat.error(peer, "无效的聊天请求")
+                        continue
+                    await chat.handle(peer, packet)
+
+            # One writer per socket; broadcasts never wait for another client's
+            # network or hold the game lock while sending.
+            tasks = [asyncio.create_task(read_messages()), asyncio.create_task(chat.write(peer, socket))]
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                task.result()
         except (ValueError, KeyError, TypeError, RoomError, TimeoutError):
             await socket.close(code=4001)
         except (WebSocketDisconnect, RuntimeError):
             pass
+        except asyncio.CancelledError:
+            pass
         finally:
-            if pending:
-                app.state.pending_sockets -= 1
-            if connection is not None:
-                await run_in_threadpool(rooms.close_connection, token, connection)
+            with anyio.CancelScope(shield=True):
+                if peer is not None:
+                    chat.detach(peer)
+                for task in tasks:
+                    task.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                if pending:
+                    app.state.pending_sockets -= 1
+                if connection is not None:
+                    await run_in_threadpool(rooms.close_connection, token, connection)
 
     @app.get("/")
     @app.get("/index.html")
     def index():
         html = (SHARED_STATIC / "index.html").read_text(encoding="utf-8")
-        html = html.replace('<script src="/app.js" defer></script>', '<link rel="stylesheet" href="/multiplayer.css"><script src="/multiplayer.js" defer></script><script src="/app.js" defer></script>')
+        html = html.replace('<script src="/app.js" defer></script>', '<link rel="stylesheet" href="/multiplayer.css"><script src="/chat.js" defer></script><script src="/multiplayer.js" defer></script><script src="/app.js" defer></script>')
         html = html.replace('<body>', '<body class="local-multiplayer">')
         html = html.replace('</header>', '</header>' + (LOCAL_STATIC / "controls.html").read_text(encoding="utf-8"), 1)
         return HTMLResponse(html)
@@ -226,7 +265,8 @@ def create_app(*, settings=None, runtime=None):
     @app.get("/{path:path}")
     def asset(path: str):
         paths = {"app.js": SHARED_STATIC / "app.js", "styles.css": SHARED_STATIC / "styles.css",
-                 "multiplayer.js": LOCAL_STATIC / "client.js", "multiplayer.css": LOCAL_STATIC / "local.css"}
+                 "multiplayer.js": LOCAL_STATIC / "client.js", "multiplayer.css": LOCAL_STATIC / "local.css",
+                 "chat.js": LOCAL_STATIC / "chat.js"}
         if path.startswith("tiles/") and path[6:] in TILE_NAMES:
             return FileResponse(PICTURES / path[6:])
         if path.startswith("assets/") and path[7:] in ASSETS:

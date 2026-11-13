@@ -38,7 +38,7 @@ from simulator.action_options import (
 )
 from simulator.action_resolver import resolve_response_requests
 from simulator.config import GameConfig, GameMode
-from simulator.hand_state import HandGroup, HandTile
+from simulator.hand_state import HandTile
 from simulator.melds import (
     make_an_gang_meld,
     make_chi_meld,
@@ -68,7 +68,6 @@ from simulator.settlement import (
 from simulator.tile_selection import (
     TileSelectionError,
     select_tiles,
-    select_tiles_by_region_order,
 )
 
 
@@ -82,6 +81,7 @@ class GameStateError(ValueError):
 class GamePhase(str, Enum):
     INIT = "INIT"
     DEALING = "DEALING"
+    HAND_PREPARATION = "HAND_PREPARATION"
     WAITING_DRAW = "WAITING_DRAW"
     WAITING_TURN_ACTION = "WAITING_TURN_ACTION"
     WAITING_RESPONSE = "WAITING_RESPONSE"
@@ -163,14 +163,13 @@ class PlayerState:
     win_order: int | None = None
     win_settlement_id: str | None = None
     hand_tile_ids: list[str] = field(default_factory=list, init=False, repr=False)
-    hand_groups: list[HandGroup] = field(default_factory=list)
     _identity_values: list[TileValue] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._reset_hand_identity()
 
     def add_hand_tile(self, value: TileValue) -> HandTile:
-        """Append a new ungrouped tile at the visual right edge."""
+        """Append a new tile at the right edge."""
         self._ensure_hand_identity()
         tile = HandTile.create(value)
         self.hand_tiles.append(value)
@@ -194,96 +193,9 @@ class PlayerState:
     def tile_value(self, tile_id: str) -> TileValue:
         return self.hand_tiles[self._tile_index(tile_id)]
 
-    def loose_tile_ids(self) -> list[str]:
-        self._ensure_hand_identity()
-        grouped_ids = {
-            tile_id for group in self.hand_groups for tile_id in group.tile_ids
-        }
-        return [
-            tile_id for tile_id in self.hand_tile_ids if tile_id not in grouped_ids
-        ]
-
-    def create_hand_group(self, tile_ids: list[str]) -> HandGroup:
-        """Create the rightmost private group using current visual tile order."""
-        self._ensure_hand_identity()
-        if not tile_ids:
-            raise GameStateError("分组至少需要一张牌")
-        if len(tile_ids) != len(set(tile_ids)):
-            raise GameStateError("同一张牌不能在分组中重复出现")
-
-        known_ids = set(self.hand_tile_ids)
-        unknown_ids = [tile_id for tile_id in tile_ids if tile_id not in known_ids]
-        if unknown_ids:
-            raise GameStateError(f"分组包含不属于该玩家的牌: {unknown_ids[0]}")
-
-        selected_ids = [
-            tile_id for tile_id in self.hand_tile_ids if tile_id in set(tile_ids)
-        ]
-        for group in self.hand_groups:
-            group.tile_ids = [
-                tile_id for tile_id in group.tile_ids if tile_id not in tile_ids
-            ]
-        self._remove_empty_groups()
-
-        created_order = max(
-            (group.created_order for group in self.hand_groups),
-            default=-1,
-        ) + 1
-        new_group = HandGroup(tile_ids=selected_ids, created_order=created_order)
-        self.hand_groups.append(new_group)
-        self._rebuild_visual_order()
-        return new_group
-
-    def disband_hand_group(self, group_id: str) -> HandGroup:
-        """Move a group's tiles to the left edge of the loose-tile region."""
-        self._ensure_hand_identity()
-        for index, group in enumerate(self.hand_groups):
-            if group.group_id == group_id:
-                removed = self.hand_groups.pop(index)
-                self._rebuild_visual_order()
-                return removed
-        raise GameStateError(f"未知手牌分组: {group_id}")
-
-    def move_tile_by_id(
-        self,
-        tile_id: str,
-        to_index: int,
-        *,
-        group_id: Optional[str] = None,
-    ) -> None:
-        """Move a tile within/to a group, or to the loose region when group_id is None."""
-        self._ensure_hand_identity()
-        self._tile_index(tile_id)
-        target_group = None
-        if group_id is not None:
-            target_group = next(
-                (group for group in self.hand_groups if group.group_id == group_id),
-                None,
-            )
-            if target_group is None:
-                raise GameStateError(f"未知手牌分组: {group_id}")
-
-        # Validate the destination after a hypothetical removal, before changing
-        # any group. Inserting into the copy also validates the index type.
-        if target_group is not None:
-            target_ids = [member for member in target_group.tile_ids if member != tile_id]
-            if to_index < 0 or to_index > len(target_ids):
-                raise GameStateError(f"组内目标位置越界: {to_index}")
-            target_ids.insert(to_index, tile_id)
-            loose_ids = None
-        else:
-            loose_ids = [member for member in self.loose_tile_ids() if member != tile_id]
-            if to_index < 0 or to_index > len(loose_ids):
-                raise GameStateError(f"散牌目标位置越界: {to_index}")
-            loose_ids.insert(to_index, tile_id)
-
-        for group in self.hand_groups:
-            if group is target_group:
-                group.tile_ids = target_ids
-            else:
-                group.tile_ids = [member for member in group.tile_ids if member != tile_id]
-        self._remove_empty_groups()
-        self._rebuild_visual_order(loose_ids=loose_ids)
+    def move_tile_by_id(self, tile_id: str, to_index: int) -> None:
+        """Move a physical tile within the single hand order."""
+        self.move_tile(self._tile_index(tile_id), to_index)
 
     def remove_tile_value(self, tile: TileValue) -> TileValue:
         """Remove the first matching value.
@@ -302,10 +214,9 @@ class PlayerState:
         self._ensure_hand_identity()
         if index < 0 or index >= len(self.hand_tiles):
             raise GameStateError(f"手牌位置越界: {index}")
-        tile_id = self.hand_tile_ids.pop(index)
+        self.hand_tile_ids.pop(index)
         self._identity_values.pop(index)
         tile = self.hand_tiles.pop(index)
-        self._remove_tile_from_groups(tile_id)
         return tile
 
     def remove_tile_by_id(self, tile_id: str) -> TileValue:
@@ -327,7 +238,7 @@ class PlayerState:
         return removed
 
     def remove_leftmost_values(self, values: list[TileValue]) -> list[TileValue]:
-        """Compatibility helper for meld execution until actions submit tile IDs."""
+        """Remove matching values for engine callers without physical IDs."""
         removed = []
         for value in values:
             self._ensure_hand_identity()
@@ -345,9 +256,6 @@ class PlayerState:
             raise GameStateError(f"起始手牌位置越界: {from_index}")
         if to_index < 0 or to_index >= len(self.hand_tiles):
             raise GameStateError(f"目标手牌位置越界: {to_index}")
-        if self.hand_groups:
-            raise GameStateError("存在手牌分组时请使用 tile_id 和目标区域移动牌")
-
         to_index = operator.index(to_index)
         tile = self.hand_tiles.pop(from_index)
         tile_id = self.hand_tile_ids.pop(from_index)
@@ -379,11 +287,6 @@ class PlayerState:
             data["hand_tile_records"] = [
                 tile.to_dict() for tile in self.hand_tile_records()
             ]
-            tiles_by_id = dict(zip(self.hand_tile_ids, self.hand_tiles))
-            data["hand_groups"] = [
-                group.to_dict(tiles_by_id) for group in self.hand_groups
-            ]
-            data["loose_tile_ids"] = self.loose_tile_ids()
         return data
 
     def _tile_index(self, tile_id: str) -> int:
@@ -399,41 +302,11 @@ class PlayerState:
             or self._identity_values != self.hand_tiles
         ):
             # Direct hand_tiles assignment remains supported for tests and setup.
-            # It starts a new physical hand, so previous IDs/groups cannot survive.
+            # It starts a new physical hand, so previous IDs cannot survive.
             self._reset_hand_identity()
 
     def _reset_hand_identity(self) -> None:
         self.hand_tile_ids = [HandTile.create(value).tile_id for value in self.hand_tiles]
-        self._identity_values = list(self.hand_tiles)
-        self.hand_groups.clear()
-
-    def _remove_tile_from_groups(self, tile_id: str) -> None:
-        for group in self.hand_groups:
-            group.tile_ids = [member for member in group.tile_ids if member != tile_id]
-        self._remove_empty_groups()
-
-    def _remove_empty_groups(self) -> None:
-        self.hand_groups = [group for group in self.hand_groups if group.tile_ids]
-
-    def _rebuild_visual_order(self, *, loose_ids: Optional[list[str]] = None) -> None:
-        values_by_id = dict(zip(self.hand_tile_ids, self.hand_tiles))
-        grouped_ids = [
-            tile_id for group in self.hand_groups for tile_id in group.tile_ids
-        ]
-        if len(grouped_ids) != len(set(grouped_ids)):
-            raise GameStateError("同一张牌不能属于多个手牌分组")
-
-        if loose_ids is None:
-            grouped_set = set(grouped_ids)
-            loose_ids = [
-                tile_id for tile_id in self.hand_tile_ids if tile_id not in grouped_set
-            ]
-        desired_ids = grouped_ids + loose_ids
-        if len(desired_ids) != len(values_by_id) or set(desired_ids) != set(values_by_id):
-            raise GameStateError("手牌分组与实体牌状态不一致")
-
-        self.hand_tile_ids = desired_ids
-        self.hand_tiles = [values_by_id[tile_id] for tile_id in desired_ids]
         self._identity_values = list(self.hand_tiles)
 
 
@@ -486,6 +359,7 @@ class GameState:
         rule_adapter: Optional[RuleAdapter] = None,
         scoring_adapter: Optional[ScoringAdapter] = None,
         config: Optional[GameConfig] = None,
+        now: float = 0.0,
     ) -> "GameState":
         if player_names is None:
             player_names = ["玩家", "下家", "对家", "上家"]
@@ -517,10 +391,10 @@ class GameState:
             current_turn_seat=dealer_seat,
             phase=GamePhase.INIT,
         )
-        game.deal_initial_hands()
+        game.deal_initial_hands(now=now)
         return game
 
-    def deal_initial_hands(self, tiles_per_player: int = 13) -> None:
+    def deal_initial_hands(self, tiles_per_player: int = 13, *, now: float = 0.0) -> None:
         self._require_phase(GamePhase.INIT)
         self.phase = GamePhase.DEALING
         self._log_event("round_started", dealer_seat=self.dealer_seat)
@@ -531,6 +405,10 @@ class GameState:
 
         self.phase = GamePhase.WAITING_DRAW
         self._log_event("initial_hands_dealt", tiles_per_player=tiles_per_player)
+        if self.config.hand_preparation_seconds > 0:
+            self.phase = GamePhase.HAND_PREPARATION
+            self.active_timer = TimerState.start(TimerKind.HAND_PREPARATION, now,
+                                                 self.config.hand_preparation_seconds)
 
     def draw_tile(self, player_id: str, *, now: float = 0.0) -> TileValue:
         self._require_phase(GamePhase.WAITING_DRAW)
@@ -607,21 +485,40 @@ class GameState:
         *,
         now: float = 0.0,
         source_turn_window_id: Optional[str] = None,
+        hand_order: Optional[list[str]] = None,
     ) -> DiscardRecord:
         """Discard the exact physical tile selected by the player."""
         self._require_phase(GamePhase.WAITING_TURN_ACTION)
         self._require_turn_window(source_turn_window_id)
         player = self._require_current_player(player_id)
+        if self.active_timer is not None and self.active_timer.is_expired(now):
+            self._expire_turn_decision(now)
+            raise GameStateError("t3 已超时，系统已执行默认弃牌")
         self._require_gang_prompt_resolved(player_id)
         hand_index = player._tile_index(tile_id)
+        if hand_order is not None:
+            if (type(hand_order) is not list or any(type(tid) is not str for tid in hand_order)
+                    or len(hand_order) != len(player.hand_tile_ids)
+                    or len(set(hand_order)) != len(hand_order)
+                    or set(hand_order) != set(player.hand_tile_ids)):
+                raise GameStateError("手牌顺序必须包含本人当前全部实体牌且不能重复")
+            hand_index = hand_order.index(tile_id)
         discarded_tile = player.remove_tile_by_id(tile_id)
-        return self._record_discard(
+        record = self._record_discard(
             player,
             discarded_tile,
             tile_id=tile_id,
             hand_index=hand_index,
             now=now,
         )
+        if hand_order is not None:
+            # Commit presentation order only after the discard succeeds. Other
+            # seats' response options depend on values, never this private order.
+            values = dict(zip(player.hand_tile_ids, player.hand_tiles))
+            player.hand_tile_ids = [tid for tid in hand_order if tid != tile_id]
+            player.hand_tiles = [values[tid] for tid in player.hand_tile_ids]
+            player._identity_values = list(player.hand_tiles)
+        return record
 
     def reorder_hand_tile(
         self,
@@ -647,55 +544,17 @@ class GameState:
         tile_id: str,
         to_index: int,
         *,
-        group_id: Optional[str] = None,
         source_turn_window_id: Optional[str] = None,
     ) -> None:
         player = self._require_layout_player(player_id)
-        player.move_tile_by_id(tile_id, to_index, group_id=group_id)
+        player.move_tile_by_id(tile_id, to_index)
         self._log_event(
             "hand_tile_moved",
             _private_to_player_id=player_id,
             player_id=player_id,
             tile_id=tile_id,
-            group_id=group_id,
             to_index=to_index,
         )
-
-    def create_hand_group(
-        self,
-        player_id: str,
-        tile_ids: list[str],
-        *,
-        source_turn_window_id: Optional[str] = None,
-    ) -> HandGroup:
-        player = self._require_layout_player(player_id)
-        group = player.create_hand_group(tile_ids)
-        self._log_event(
-            "hand_group_created",
-            _private_to_player_id=player_id,
-            player_id=player_id,
-            group_id=group.group_id,
-            tile_ids=list(group.tile_ids),
-        )
-        return group
-
-    def disband_hand_group(
-        self,
-        player_id: str,
-        group_id: str,
-        *,
-        source_turn_window_id: Optional[str] = None,
-    ) -> HandGroup:
-        player = self._require_layout_player(player_id)
-        group = player.disband_hand_group(group_id)
-        self._log_event(
-            "hand_group_disbanded",
-            _private_to_player_id=player_id,
-            player_id=player_id,
-            group_id=group_id,
-            tile_ids=list(group.tile_ids),
-        )
-        return group
 
     def apply_chi(self, player_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Execute chi using canonical display data from ActionOption payload."""
@@ -808,6 +667,7 @@ class GameState:
         option_id: Optional[str] = None,
         now: float = 0.0,
         source_turn_window_id: Optional[str] = None,
+        selected_tile_ids: Optional[list[str]] = None,
     ) -> Optional[dict[str, Any]]:
         """Submit self draw, PASS, an-gang, or jia-gang in the current t3."""
         self._require_phase(GamePhase.WAITING_TURN_ACTION)
@@ -818,7 +678,7 @@ class GameState:
             raise GameStateError("t3 已超时，系统已执行默认弃牌")
 
         if action_type == ActionType.PASS:
-            if option_id is not None:
+            if option_id is not None or selected_tile_ids is not None:
                 raise GameStateError("t3 PASS 不接受 option_id")
             if not self._has_unpassed_gang_prompt(player_id) and not (
                 not self.turn_hu_prompt_passed
@@ -838,7 +698,7 @@ class GameState:
             return None
 
         if action_type == ActionType.HU:
-            if option_id is not None:
+            if option_id is not None or selected_tile_ids is not None:
                 raise GameStateError("胡牌自动选择最高番，不接受 option_id")
             if self.turn_hu_prompt_passed or self.drawn_tile_id is None:
                 raise GameStateError("当前不能自摸胡牌")
@@ -876,14 +736,11 @@ class GameState:
 
         payload = self._select_turn_payload(option, option_id)
         try:
-            if action_type == ActionType.AN_GANG:
-                required_values = list(payload["required_values"])
-                selection = select_tiles(player, required_values)
+            if selected_tile_ids is not None:
+                selection = select_tiles(player, list(payload["required_values"]),
+                                         selected_tile_ids=selected_tile_ids, allow_explicit_selection=True)
             else:
-                selection = select_tiles_by_region_order(
-                    player,
-                    list(payload["required_values"]),
-                )
+                selection = select_tiles(player, list(payload["required_values"]))
         except (KeyError, TileSelectionError, GameStateError) as exc:
             raise GameStateError(f"杠牌选项已经失效: {exc}") from exc
 
@@ -967,6 +824,8 @@ class GameState:
         self.response_window = self._create_response_window(record, now=now)
         self.phase = GamePhase.WAITING_RESPONSE
         self._log_event("tile_discarded", hand_index=hand_index, **record.to_dict())
+        if self.config.fast_mode and self.response_window.is_complete():
+            self._resolve_response_window("no_response_options", now=now)
         return record
 
     def _open_rob_kong_window(
@@ -1125,6 +984,7 @@ class GameState:
         *,
         now: Optional[float] = None,
         source_window_id: Optional[str] = None,
+        selected_tile_ids: Optional[list[str]] = None,
     ) -> None:
         """Submit one final t1 response after validating the offered options."""
         self._require_phase(GamePhase.WAITING_RESPONSE)
@@ -1153,12 +1013,24 @@ class GameState:
         if action_type not in offered_types:
             raise GameStateError(f"玩家 {player_id} 当前不能提交 {action_type.value}")
 
+        payload = {}
+        if selected_tile_ids is not None:
+            if action_type not in (ActionType.PENG, ActionType.MING_GANG):
+                raise GameStateError("该响应不接受实体选牌")
+            count = 3 if action_type == ActionType.PENG else 4
+            try:
+                selection = select_tiles(self.get_player(player_id), [window.discard_record.tile] * count,
+                                         selected_tile_ids=selected_tile_ids, allow_explicit_selection=True)
+            except TileSelectionError as exc:
+                raise GameStateError(str(exc)) from exc
+            payload["selected_tile_ids"] = list(selection.tile_ids)
         window.submit(
             ActionRequest(
                 player_id=player_id,
                 action_type=action_type,
                 submitted_at=now,
                 source_window_id=window.window_id,
+                payload=payload,
             )
         )
         self._log_event(
@@ -1167,9 +1039,9 @@ class GameState:
             action_type=action_type.value,
         )
 
-        # Timed t1 is fixed-duration, even when everyone already passed.
-        # Unlike t4, only an untimed t1 may resolve after the last submission.
-        if window.deadline_at is None and window.is_complete():
+        # Ordinary timed t1 stays fixed-duration. Fast mode may resolve as soon
+        # as all eligible players decide, without waiting for pass-only seats.
+        if (self.config.fast_mode or window.deadline_at is None) and window.is_complete():
             try:
                 self._resolve_response_window(
                     "all_responses_submitted",
@@ -1207,8 +1079,11 @@ class GameState:
 
         player = self.get_player(player_id)
         try:
+            if selected_tile_ids is not None and (type(selected_tile_ids) is not list
+                    or any(type(tile_id) is not str for tile_id in selected_tile_ids)):
+                raise TileSelectionError("实体牌选择必须是 ID 列表")
             if detail.selection_mode == "listed":
-                if option_id is None or selected_tile_ids is not None:
+                if option_id is None:
                     return self._pass_action_detail("missing_or_invalid_selection")
                 option = next(
                     (
@@ -1221,7 +1096,8 @@ class GameState:
                 if option is None:
                     return self._pass_action_detail("unknown_chi_option")
                 required_values = list(option["required_values"])
-                selection = select_tiles(player, required_values)
+                selection = select_tiles(player, required_values, selected_tile_ids=selected_tile_ids,
+                                         allow_explicit_selection=True)
                 payload = dict(option)
             else:
                 if selected_tile_ids is None or len(selected_tile_ids) != 3:
@@ -1272,7 +1148,11 @@ class GameState:
         timer_kind = self.active_timer.kind
         self._log_event("timer_expired", timer_kind=timer_kind.value, now=now)
 
-        if timer_kind == TimerKind.RESPONSE_WINDOW:
+        if timer_kind == TimerKind.HAND_PREPARATION:
+            self._require_phase(GamePhase.HAND_PREPARATION)
+            self.active_timer = None
+            self.phase = GamePhase.WAITING_DRAW
+        elif timer_kind == TimerKind.RESPONSE_WINDOW:
             self._expire_response_window(now)
         elif timer_kind == TimerKind.TURN_DECISION:
             self._expire_turn_decision(now)
@@ -1444,12 +1324,17 @@ class GameState:
         rng: Optional[random.Random] = None,
         shuffle: bool = True,
         source_round_id: Optional[str] = None,
+        config: Optional[GameConfig] = None,
+        timeout_config: Optional[TimeoutConfig] = None,
+        now: float = 0.0,
     ) -> None:
         """Keep cumulative scores; rotate the dealer and deal only on request."""
         self._require_phase(GamePhase.ROUND_ENDED)
         if source_round_id is not None and source_round_id != self.round_id:
             raise GameStateError("下一局请求对应的牌局已过期")
         wall = TileWall.from_rule_tiles(rng=rng, shuffle=shuffle)
+        self.config = config or self.config
+        self.timeout_config = timeout_config or self.timeout_config
         self.dealer_seat = self._next_seat(self.dealer_seat)
         self.current_turn_seat = self.dealer_seat
         self.wall = wall
@@ -1481,7 +1366,7 @@ class GameState:
         self.discard_history.clear()
         self.event_log.clear()
         self.phase = GamePhase.INIT
-        self.deal_initial_hands()
+        self.deal_initial_hands(now=now)
 
     def get_player(self, player_id: str) -> PlayerState:
         for player in self.players:
@@ -1545,7 +1430,9 @@ class GameState:
             "dealer_seat": self.dealer_seat,
             "current_turn_seat": self.current_turn_seat,
             "phase": self.phase.value,
-            "config": {"allow_multiple_hu": self.config.allow_multiple_hu, "mode": self.config.mode.value},
+            "config": {"allow_multiple_hu": self.config.allow_multiple_hu, "mode": self.config.mode.value,
+                       "fast_mode": self.config.fast_mode,
+                       "hand_preparation_seconds": self.config.hand_preparation_seconds},
             "settlement_events": [event.to_dict() for event in self.settlement_events],
             "round_result": self.round_result.to_dict() if self.round_result else None,
             "wall": self.wall.to_dict(),
@@ -1589,7 +1476,11 @@ class GameState:
 
     def _timer_visible_to(self, player_id: Optional[str]) -> bool:
         """Countdown ownership is independent of debug hand visibility."""
-        if player_id is None or self.active_timer is None:
+        if self.active_timer is None:
+            return False
+        if self.active_timer.kind == TimerKind.HAND_PREPARATION:
+            return True
+        if player_id is None:
             return False
         if self.active_timer.kind == TimerKind.TURN_DECISION:
             return player_id == self.current_player().player_id
@@ -1658,13 +1549,14 @@ class GameState:
             options_by_player=options_by_player,
         )
 
+        if timeout is not None or self.config.fast_mode:
+            for player_id, options in options_by_player.items():
+                if self._only_pass_options(options):
+                    window.auto_passed_players.add(player_id)
+
         if timeout is None:
             self.active_timer = None
             return window
-
-        for player_id, options in options_by_player.items():
-            if self._only_pass_options(options):
-                window.auto_passed_players.add(player_id)
 
         self.active_timer = TimerState.start(
             TimerKind.RESPONSE_WINDOW,
@@ -1716,7 +1608,9 @@ class GameState:
             return
 
         if request.action_type == ActionType.PENG:
-            selection = select_tiles(player, [claimed_tile] * 3)
+            selection = select_tiles(player, [claimed_tile] * 3,
+                                     selected_tile_ids=request.payload.get("selected_tile_ids"),
+                                     allow_explicit_selection=True)
             self.apply_peng(
                 player.player_id,
                 claimed_tile,
@@ -1737,7 +1631,9 @@ class GameState:
             return
 
         if request.action_type == ActionType.MING_GANG:
-            selection = select_tiles(player, [claimed_tile] * 4)
+            selection = select_tiles(player, [claimed_tile] * 4,
+                                     selected_tile_ids=request.payload.get("selected_tile_ids"),
+                                     allow_explicit_selection=True)
             self.apply_ming_gang(
                 player.player_id,
                 claimed_tile,
@@ -1989,7 +1885,7 @@ class GameState:
         callers; network layout commands instead validate round and hand revision.
         Stable tile IDs also preserve pending chi and rob-kong selections.
         """
-        if self.phase not in {GamePhase.WAITING_TURN_ACTION, GamePhase.WAITING_RESPONSE,
+        if self.phase not in {GamePhase.HAND_PREPARATION, GamePhase.WAITING_TURN_ACTION, GamePhase.WAITING_RESPONSE,
                               GamePhase.WAITING_ACTION_DETAIL, GamePhase.WAITING_ROB_KONG}:
             raise GameStateError("当前没有可整理的手牌")
         return self._require_active_player(player_id)

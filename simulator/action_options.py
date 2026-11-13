@@ -159,7 +159,7 @@ def build_chi_option(
     """Return CHI when the player is the source player's next seat.
 
     Listed options are deduplicated by arithmetic formula. Physical duplicate
-    tiles are selected later by the grouping-aware tile selector.
+    tiles are selected later by the hand-order tile selector.
     """
     if player.seat != (next_seat if next_seat is not None else _next_seat(source_player.seat)):
         return None

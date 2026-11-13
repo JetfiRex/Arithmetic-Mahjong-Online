@@ -7,7 +7,7 @@ def pass_response(game, player_id, *, now):
     """Pass t1/t4 or abandon t2 without inventing a meld or a winning choice."""
     if game.phase == GamePhase.WAITING_RESPONSE:
         window = game.response_window
-        if player_id in window.options_by_player and player_id not in window.requests_by_player:
+        if player_id in window.players_requiring_input() and player_id not in window.requests_by_player:
             game.submit_response(player_id, ActionType.PASS, now=now, source_window_id=window.window_id)
     elif game.phase == GamePhase.WAITING_ROB_KONG:
         window = game.rob_kong_window
@@ -18,7 +18,7 @@ def pass_response(game, player_id, *, now):
 
 
 def discard_drawn_tile(game, player_id, *, now):
-    """Discard the physical drawn tile even after regrouping; otherwise use visual rightmost."""
+    """Use the latest authoritative rightmost entity, without browser layout."""
     player = game.get_player(player_id)
     options = game.turn_options_by_player.get(player_id, [])
     has_prompt = any(
@@ -28,5 +28,5 @@ def discard_drawn_tile(game, player_id, *, now):
     )
     if has_prompt:
         game.submit_turn_action(player_id, ActionType.PASS, now=now, source_turn_window_id=game.turn_window_id)
-    tile_id = game.drawn_tile_id if game.drawn_tile_id in player.hand_tile_ids else player.hand_tile_ids[-1]
+    tile_id = player.hand_tile_ids[-1]
     game.discard_tile_by_id(player_id, tile_id, now=now, source_turn_window_id=game.turn_window_id)

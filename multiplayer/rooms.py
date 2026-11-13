@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
@@ -17,7 +17,8 @@ from uuid import uuid4
 from simulator import (ActionType, BloodBattleScoringAdapter, GameConfig, GameMode,
                        GamePhase, GameState, NormalScoringAdapter, PlayerState, TileWall)
 from simulator.game_state import GameStateError
-from multiplayer.settings import DEFAULT_TIMEOUTS, parse_timeouts
+from multiplayer.settings import (DEFAULT_HAND_PREPARATION_SECONDS, DEFAULT_TIMEOUTS,
+                                  parse_hand_preparation_seconds, parse_timeouts)
 from multiplayer.round_review import RecordingRandom, RoundWallRecord
 
 
@@ -88,9 +89,14 @@ class Room:
     timeouts: dict = field(default_factory=lambda: dict(vars(DEFAULT_TIMEOUTS)))
     allow_multiple_hu: bool = True
     mode: GameMode = GameMode.NORMAL
+    fast_mode: bool = False
+    hand_preparation_seconds: float = DEFAULT_HAND_PREPARATION_SECONDS
     hand_revisions: dict[str, int] = field(default_factory=dict)
     hand_signatures: dict[str, str] = field(default_factory=dict)
     seen_commands: OrderedDict = field(default_factory=OrderedDict)
+    chat_messages: deque = field(default_factory=lambda: deque(maxlen=100))
+    chat_sequence: int = 0
+    chat_seen: OrderedDict = field(default_factory=OrderedDict)
 
 
 class LocalRooms:
@@ -146,7 +152,9 @@ class LocalRooms:
             room.phase = RoomPhase.REVIEWING
             room.revision += 1
         for player in game.players:
-            signature = json.dumps(player.to_public_dict(reveal_hand=True), ensure_ascii=False, sort_keys=True)
+            player._ensure_hand_identity()
+            signature = json.dumps([player.hand_tile_ids, player.hand_tiles, player.melded_groups, player.is_out],
+                                   ensure_ascii=False, sort_keys=True)
             if room.hand_signatures.get(player.player_id) != signature:
                 room.hand_signatures[player.player_id] = signature
                 room.hand_revisions[player.player_id] = room.hand_revisions.get(player.player_id, 0) + 1
@@ -211,18 +219,19 @@ class LocalRooms:
                 settings = parse_timeouts(command.get("timeouts"))
                 multiple = command.get("allow_multiple_hu")
                 _check(type(multiple) is bool, "请指定是否允许一炮多响")
+                fast_mode = command.get("fast_mode", room.fast_mode)
+                _check(type(fast_mode) is bool, "快速模式必须为开启或关闭")
+                preparation = parse_hand_preparation_seconds(command.get("hand_preparation_seconds", room.hand_preparation_seconds))
                 mode = command.get("mode", room.mode.value)
                 _check(type(mode) is str and mode in {item.value for item in GameMode}, "未知牌局模式")
                 mode = GameMode(mode)
-                rules = GameConfig(allow_multiple_hu=multiple, mode=mode)
+                rules = GameConfig(allow_multiple_hu=multiple, mode=mode, fast_mode=fast_mode,
+                                   hand_preparation_seconds=preparation)
                 rng = RecordingRandom()
                 if room.game is not None:
                     _check(command.get("round_id") == room.game.round_id, "上一局已变化")
-                    room.game.start_next_round(source_round_id=room.game.round_id, rng=rng)
-                    # The new round is dealt but has not drawn or opened a timer.
-                    # Apply its rules together under the room lock, preserving
-                    # the completed result until the host actually confirms start.
-                    room.game.config, room.game.timeout_config = rules, settings
+                    room.game.start_next_round(source_round_id=room.game.round_id, rng=rng,
+                                               config=rules, timeout_config=settings, now=timestamp)
                     if type(room.game.scoring_adapter) in (NormalScoringAdapter, BloodBattleScoringAdapter):
                         room.game.scoring_adapter = (BloodBattleScoringAdapter() if mode == GameMode.BLOOD_BATTLE
                                                     else NormalScoringAdapter())
@@ -233,12 +242,15 @@ class LocalRooms:
                         player_names=[room.members[member_id].name for member_id in seats],
                         timeout_config=settings, config=rules,
                         rng=rng,
+                        now=timestamp,
                     )
                 for player in room.game.players:
                     player.is_human = True
                 room.seats, room.round_members = list(seats), list(seats)
                 room.timeouts, room.allow_multiple_hu = dict(vars(settings)), multiple
                 room.mode = mode
+                room.fast_mode = fast_mode
+                room.hand_preparation_seconds = preparation
                 room.round_number += 1
                 room.wall_records[room.game.round_id] = RoundWallRecord.begin(room.game, room.round_number, rng)
                 room.phase = RoomPhase.PLAYING
@@ -293,7 +305,7 @@ class LocalRooms:
                 game = room.game
                 pid = f"p{room.round_members.index(member.member_id)}"
                 _check(command.get("round_id") == game.round_id, "该操作属于旧牌局")
-                if kind in {"discard", "move", "group", "disband", "chi"}:
+                if kind in {"discard", "chi"} or (kind in {"response", "turn_action"} and "selected_tile_ids" in command):
                     _check(command.get("hand_revision") == room.hand_revisions[pid], "手牌已变化，请重新选择")
                 self._game_command(game, pid, kind, command, timestamp)
                 self._advance(room, timestamp)
@@ -321,27 +333,35 @@ class LocalRooms:
     def _game_command(game, pid, kind, command, now):
         """Bind every intention to its real seat and require its original window."""
         turn = command.get("turn_window_id")
+        _check(kind == "discard" or "hand_order" not in command, "手牌顺序只能随出牌提交")
+        selected = command.get("selected_tile_ids")
+        if (kind == "response" and command.get("action") in {"PENG", "MING_GANG"}
+                or kind == "turn_action" and command.get("action") in {"AN_GANG", "JIA_GANG"}):
+            _check(type(selected) is list, "请提交本次动作使用的实体牌")
         if kind in {"discard", "turn_action"}:
             _check(type(turn) is str and turn == game.turn_window_id, "出牌窗口已变化")
         if kind == "discard":
-            game.discard_tile_by_id(pid, command["tile_id"], now=now, source_turn_window_id=turn)
+            _check("hand_order" not in command or type(command["hand_order"]) is list, "手牌顺序必须是 ID 列表")
+            game.discard_tile_by_id(pid, command["tile_id"], now=now, source_turn_window_id=turn,
+                                    hand_order=command.get("hand_order"))
         elif kind == "turn_action":
-            game.submit_turn_action(pid, ActionType(command["action"]), option_id=command.get("option_id"), now=now, source_turn_window_id=turn)
+            game.submit_turn_action(pid, ActionType(command["action"]), option_id=command.get("option_id"),
+                                    selected_tile_ids=selected, now=now, source_turn_window_id=turn)
         elif kind == "response":
             _check(game.response_window is not None and command.get("window_id") == game.response_window.window_id, "响应窗口已变化")
-            game.submit_response(pid, ActionType(command["action"]), now=now, source_window_id=command["window_id"])
+            game.submit_response(pid, ActionType(command["action"]), selected_tile_ids=selected,
+                                 now=now, source_window_id=command["window_id"])
         elif kind == "rob_response":
             _check(game.rob_kong_window is not None and command.get("window_id") == game.rob_kong_window.window_id, "抢杠窗口已变化")
             game.submit_rob_kong_response(pid, ActionType(command["action"]), now=now, source_window_id=command["window_id"])
         elif kind == "chi":
             _check(game.pending_action_detail is not None and command.get("detail_id") == game.pending_action_detail.detail_id, "吃牌选择窗口已变化")
-            game.submit_chi_detail(pid, option_id=command.get("option_id"), selected_tile_ids=command.get("tile_ids"), now=now, detail_id=command["detail_id"])
+            chosen = selected if "selected_tile_ids" in command else command.get("tile_ids")
+            _check(not command.get("option_id") or type(chosen) is list, "请提交吃牌使用的实体牌")
+            game.submit_chi_detail(pid, option_id=command.get("option_id"), selected_tile_ids=chosen,
+                                   now=now, detail_id=command["detail_id"])
         elif kind == "move":
-            game.move_hand_tile_by_id(pid, command["tile_id"], command["index"], group_id=command.get("group_id"), source_turn_window_id=turn)
-        elif kind == "group":
-            game.create_hand_group(pid, command["tile_ids"], source_turn_window_id=turn)
-        elif kind == "disband":
-            game.disband_hand_group(pid, command["group_id"], source_turn_window_id=turn)
+            raise RoomError("手牌整理已改为浏览器本地操作，请刷新页面")
         else:
             raise RoomError("本地房间不支持该操作")
 
@@ -412,14 +432,15 @@ class LocalRooms:
                     "bot_count": sum(person.is_bot for person in room.members.values()), "human_limit": 10,
                     "spectator_seat": member.spectator_seat,
                     "spectator_mode": member.spectator_mode, "allow_multiple_hu": room.allow_multiple_hu,
-                    "mode": room.mode.value,
+                    "mode": room.mode.value, "fast_mode": room.fast_mode,
+                    "hand_preparation_seconds": room.hand_preparation_seconds,
                 },
                 ui={"stage": stage, "mode": "four", "started": started,
                     "round_number": room.round_number if room else 0,
                     "settings_locked": room is not None and room.phase not in {RoomPhase.WAITING_PLAYERS, RoomPhase.ARRANGING},
                     "timeout_settings": room.timeouts if room else dict(vars(DEFAULT_TIMEOUTS)),
-                    "grouping_allowed": pid is not None and not game.get_player(pid).is_out and game.phase in {
-                        GamePhase.WAITING_TURN_ACTION, GamePhase.WAITING_RESPONSE,
+                    "sorting_allowed": pid is not None and not game.get_player(pid).is_out and game.phase in {
+                        GamePhase.HAND_PREPARATION, GamePhase.WAITING_TURN_ACTION, GamePhase.WAITING_RESPONSE,
                         GamePhase.WAITING_ACTION_DETAIL, GamePhase.WAITING_ROB_KONG},
                     "editing_allowed": False, "scene": "", "scenes": {}, "phase_history": [],
                     "drawn_tile_id": game.drawn_tile_id if pid == game.current_player().player_id else None},

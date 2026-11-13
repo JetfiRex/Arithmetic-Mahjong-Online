@@ -118,6 +118,7 @@ def main():
                 page.locator("#bot-profile-list select").nth(index).select_option(profile)
                 page.wait_for_function(f"() => state.room.members.some(m => m.bot_profile === {json.dumps(profile)})")
             page.locator("#local-timers-enabled").uncheck()
+            page.locator("#local-hand-preparation").fill("0")
             for width, height in [(2560, 1440), (390, 844)]:
                 page.set_viewport_size({"width": width, "height": height})
                 page.screenshot(path=str(output / f"bot-settings-{width}.png"))
@@ -125,15 +126,11 @@ def main():
             page.set_viewport_size({"width": 2560, "height": 1440})
             page.locator("#local-start").click()
             page.wait_for_function("() => state.room.phase === 'PLAYING' && state.current_turn_seat === 0")
-            for index in range(3):
-                page.locator("#hand-regions [data-tile-id]").nth(index).click(button="right")
-            page.get_by_role("button", name="分为一组", exact=True).click()
-            page.wait_for_function("() => me().hand_groups.length === 1")
             # Exercise the same native drag/drop path as human-only multiplayer.
-            loose = page.locator("#hand-regions [draggable=true]")
-            if loose.count() >= 2:
+            tiles = page.locator("#hand-regions [draggable=true]")
+            if tiles.count() >= 2:
                 before = page.evaluate("me().hand_tile_records.map(t => t.tile_id)")
-                loose.nth(loose.count() - 1).drag_to(loose.nth(3), target_position={"x": 4, "y": 30})
+                tiles.last.drag_to(tiles.first, target_position={"x": 4, "y": 30})
                 page.wait_for_function(f"() => JSON.stringify(me().hand_tile_records.map(t => t.tile_id)) !== {json.dumps(json.dumps(before, separators=(',', ':')))}")
             for width, height in [(2560, 1440), (1707, 960), (390, 844)]:
                 page.set_viewport_size({"width": width, "height": height})

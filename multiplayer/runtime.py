@@ -229,8 +229,8 @@ class LiveRooms(LocalRooms):
         game = room.game
         if game.phase == GamePhase.WAITING_TURN_ACTION and table.seats[room.round_members[game.current_turn_seat]].autopilot:
             if game.active_timer is not None and game.active_timer.is_expired(now):
-                # A bot's default is the drawn entity, not the human timeout's
-                # visual-rightmost policy. Commit it before ordinary expiry.
+                # Commit the authoritative rightmost entity once, before the
+                # ordinary expiry path can advance this same window again.
                 game.active_timer = None
                 discard_drawn_tile(game, game.current_player().player_id, now=now)
                 self._advance(room, now)
@@ -374,13 +374,13 @@ class LiveRooms(LocalRooms):
                 packet["ui"]["autopilot"] = bool(control and control.autopilot and room.phase == RoomPhase.PLAYING
                     and not (packet.get("viewer_player_id") and room.game.get_player(packet["viewer_player_id"]).is_out))
                 if packet["ui"]["autopilot"]:
-                    packet["ui"]["grouping_allowed"] = False
+                    packet["ui"]["sorting_allowed"] = False
                     packet["ui"]["stage"] = "AUTOPILOT"
                 if room.recovery_pending:
                     timer = packet["active_timer"]
                     remaining = max(0.0, timer["deadline_at"] - effective) if timer else packet["paused_turn_remaining_seconds"]
                     packet["ui"].update(recovery_pending=True, connection_paused=True, recovery_remaining_seconds=remaining,
-                                         grouping_allowed=False, stage="CONNECTION_PAUSED")
+                                         sorting_allowed=False, stage="CONNECTION_PAUSED")
                     packet["active_timer"] = None
                     packet["room"]["wall_review_available"] = False
             stable = {k: v for k, v in packet.items() if k not in {"server_now", "revision"}}

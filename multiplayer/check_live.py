@@ -85,6 +85,7 @@ def main():
         for index, member in enumerate(members[:4]):
             host.locator(".local-seat-select").nth(index).select_option(member)
         host.locator('.local-timer-setting[data-field="turn_action_seconds"] [type="number"]').fill("180")
+        host.locator("#local-hand-preparation").fill("0")
         host.locator("#local-start").click()
         host.wait_for_timeout(1000)
         if host.evaluate("state.room.phase") != "PLAYING" and "房间成员已变化" in host.locator("#local-settings-error").inner_text():
@@ -96,12 +97,11 @@ def main():
             host.screenshot(path=str(output / "live-start-failed.png"))
             invalid = host.evaluate("() => [...document.querySelectorAll('#local-settings-form :invalid')].map(n => ({id:n.id, value:n.value, message:n.validationMessage}))")
             raise AssertionError({"settings_error": host.locator("#local-settings-error").inner_text(), "invalid": invalid, "browser_errors": errors})
-        for index in range(3):
-            host.locator("#hand-regions [data-tile-id]").nth(index).click(button="right")
-        host.get_by_role("button", name="分为一组", exact=True).click()
-        host.wait_for_function("() => me().hand_groups.length === 1")
+        tiles = host.locator("#hand-regions [data-tile-id]")
+        before_drag = host.evaluate("me().hand_tile_records.map(t => t.tile_id)")
+        tiles.last.drag_to(tiles.first, target_position={"x": 4, "y": 30})
+        host.wait_for_function(f"() => JSON.stringify(me().hand_tile_records.map(t => t.tile_id)) !== {json.dumps(json.dumps(before_drag, separators=(',', ':')))}")
         hand_before = host.evaluate("me().hand_tile_records.map(t => t.tile_id)")
-        groups_before = host.evaluate("me().hand_groups")
         token2 = second.evaluate("localRoom.token")
         second.reload()
         second.wait_for_function("() => localRoom.connectionId && state.room?.phase === 'PLAYING'")
@@ -124,7 +124,6 @@ def main():
         third = page_for(token3)
         host.wait_for_function("() => !ui().connection_paused")
         assert host.evaluate("me().hand_tile_records.map(t => t.tile_id)") == hand_before
-        assert host.evaluate("me().hand_groups") == groups_before
         assert abs(host.evaluate("state.active_timer.deadline_at - state.server_now") - frozen) < 3
         assert third.evaluate("state.session_id") == members[2]
         second.close()
