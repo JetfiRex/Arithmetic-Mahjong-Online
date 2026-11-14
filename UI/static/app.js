@@ -43,11 +43,11 @@ function tile(value, interactive = false) {
   node.dataset.value = value;
   if (typeof value === "string") node.classList.add("operator");
   if (numberView) node.classList.add("number-view");
-  const img = element("img");
-  img.src = `/tiles/${value === "+" ? "plus" : value === "×" ? "mult" : value}.png`;
-  img.alt = "";
-  img.draggable = false;
-  node.append(img, element("span", "tile-value", value));
+  const art = element("span", "tile-art");
+  const index = VALUES.indexOf(value);
+  art.style.backgroundPosition = `${(index % 6) * 20}% ${Math.floor(index / 6) * (100 / 3)}%`;
+  art.setAttribute("aria-hidden", "true");
+  node.append(art, element("span", "tile-value", value));
   node.setAttribute("aria-label", `${value} 牌`);
   if (interactive) node.type = "button";
   return node;

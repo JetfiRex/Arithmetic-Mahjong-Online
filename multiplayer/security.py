@@ -148,8 +148,13 @@ class IngressMiddleware:
 
         async def secured_send(message):
             if message["type"] == "http.response.start":
+                # Only explicit static-asset responses may opt into caching.
+                # API data, HTML, scripts, styles and errors retain no-store.
+                cache_control = "no-store"
+                if method in {"GET", "HEAD"} and scope.get("path", "").startswith("/assets/") and message["status"] == 200:
+                    cache_control = dict(message.get("headers", [])).get(b"cache-control", b"no-store").decode("latin1")
                 extras = {
-                    "cache-control": "no-store", "x-content-type-options": "nosniff",
+                    "cache-control": cache_control, "x-content-type-options": "nosniff",
                     "referrer-policy": "no-referrer", "x-frame-options": "DENY",
                     "permissions-policy": "camera=(), microphone=(), geolocation=()",
                     "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "

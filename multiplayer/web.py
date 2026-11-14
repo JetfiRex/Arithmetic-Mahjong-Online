@@ -27,7 +27,8 @@ SHARED_STATIC = ROOT / "UI" / "static"
 LOCAL_STATIC = Path(__file__).parent / "static"
 PICTURES = ROOT / "pictures"
 TILE_NAMES = {f"{i}.png" for i in range(21)} | {"24.png", "plus.png", "mult.png", "app_icon.png"}
-ASSETS = {"icons.svg", "tile-back.svg", "LICENSE-lucide.txt"}
+TILE_ATLAS = "tiles-4c6895cd818e.png"
+ASSETS = {"icons.svg", "tile-back.svg", "LICENSE-lucide.txt", TILE_ATLAS}
 
 
 def online_rooms(**kwargs):
@@ -262,7 +263,7 @@ def create_app(*, settings=None, runtime=None):
         html = html.replace('</header>', '</header>' + (LOCAL_STATIC / "controls.html").read_text(encoding="utf-8"), 1)
         return HTMLResponse(html)
 
-    @app.get("/{path:path}")
+    @app.api_route("/{path:path}", methods=["GET", "HEAD"])
     def asset(path: str):
         paths = {"app.js": SHARED_STATIC / "app.js", "styles.css": SHARED_STATIC / "styles.css",
                  "multiplayer.js": LOCAL_STATIC / "client.js", "multiplayer.css": LOCAL_STATIC / "local.css",
@@ -270,7 +271,8 @@ def create_app(*, settings=None, runtime=None):
         if path.startswith("tiles/") and path[6:] in TILE_NAMES:
             return FileResponse(PICTURES / path[6:])
         if path.startswith("assets/") and path[7:] in ASSETS:
-            return FileResponse(SHARED_STATIC / "assets" / path[7:])
+            headers = {"Cache-Control": "public, max-age=31536000, immutable"} if path[7:] == TILE_ATLAS else None
+            return FileResponse(SHARED_STATIC / "assets" / path[7:], headers=headers)
         if path in paths:
             return FileResponse(paths[path])
         raise HTTPException(404, "接口或资源不存在")
