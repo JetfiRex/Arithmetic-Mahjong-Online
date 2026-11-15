@@ -8,6 +8,7 @@
   <link rel="icon" href="/tiles/app_icon.png">
   <link rel="preload" as="image" href="/assets/tiles-4c6895cd818e.png">
   <link rel="stylesheet" href="/styles.css">
+  <script src="/reference.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -20,6 +21,108 @@
       <button class="icon-button mobile-only" id="developer-toggle" title="打开牌堆" aria-label="打开牌堆"><svg class="icon"><use href="/assets/icons.svg#layers"></use></svg></button>
     </div>
   </header>
+
+  <button class="reference-toggle" id="reference-toggle" type="button" aria-label="打开规则速查" aria-expanded="false" aria-controls="reference-sidebar" title="规则、牌池构成与番数表"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#book"></use></svg><span>速查</span></button>
+  <aside class="reference-sidebar" id="reference-sidebar" aria-labelledby="reference-title" hidden>
+    <div class="reference-heading"><div><span class="eyebrow">REFERENCE</span><h2 id="reference-title">牌桌速查</h2></div><button class="icon-button" id="reference-close" type="button" aria-label="收起规则速查" title="收起"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#x"></use></svg></button></div>
+    <div class="reference-tabs" role="tablist" aria-label="速查内容">
+      <button id="reference-tab-rules" type="button" role="tab" aria-selected="true" aria-controls="reference-rules" tabindex="0">规则</button>
+      <button id="reference-tab-pool" type="button" role="tab" aria-selected="false" aria-controls="reference-pool" tabindex="-1">牌池构成</button>
+      <button id="reference-tab-fans" type="button" role="tab" aria-selected="false" aria-controls="reference-fans" tabindex="-1">番数表</button>
+    </div>
+    <section class="reference-content" id="reference-rules" role="tabpanel" aria-labelledby="reference-tab-rules" tabindex="0">
+      <p class="reference-intro">按规则书整理。先看牌型，再看流程与计分。</p>
+      <h3>牌与基本胡型</h3>
+      <p>数字牌为 0～20、24，符号牌为 +、×。牌面左上角是牌值，右下角是牌池张数，中间图案用于传统麻将胡法。</p>
+      <p>算式由四张牌组成：a、符号、b、c，满足 a + b = c 或 a × b = c。交换两个加数或因数，仍算同一个式子。</p>
+      <p class="reference-example">例：1 + 9 10</p>
+      <p>刻子为四张或五张相同牌；对子为两张相同牌。普通胡型是三组算式或刻子，加一个对子。特殊胡法见番数表。</p>
+      <h3>发牌与轮庄</h3>
+      <p>四家各有 13 张起手牌，庄家先摸。通常每回合摸一张、打一张；每局结束后庄家传给下一位。出牌后暗手张数为 13 减去已吃碰杠组数的四倍，即 13、9、5 或 1 张。</p>
+      <h3>吃、碰、杠</h3>
+      <dl class="reference-definitions">
+        <dt>吃</dt><dd>只能吃上家刚打出的牌，用自己的三张牌与它组成算式。吃完直接出一张，不再摸牌或杠牌。</dd>
+        <dt>碰</dt><dd>任意一家出牌后，用自己的三张同值牌与它组成四张刻子。碰完直接出一张，不再摸牌或杠牌。</dd>
+        <dt>明杠</dt><dd>任意一家出牌后，用自己的四张同值牌与它组成五张刻子。亮出后补摸一张，再继续自己的回合。</dd>
+        <dt>暗杠</dt><dd>摸牌后，五张同值牌可组成暗杠，随后补摸一张。</dd>
+        <dt>加杠</dt><dd>已有碰组后，摸到同值牌可将其补为五张杠组，随后补摸一张。</dd>
+      </dl>
+      <p>牌山无牌时，不能明杠、暗杠或加杠。杠后补摸仍可继续合法的回合操作，最后出一张牌。</p>
+      <h3>听牌、胡牌与优先级</h3>
+      <p>还差一张即可成胡，称为听牌。自己摸到所听牌是自摸；别人打出所听牌是点胡；别人加杠的牌正好能胡，可以抢杠。</p>
+      <p>同时响应时，优先级为：胡 &gt; 杠 &gt; 碰 &gt; 吃。允许一炮多响；多个碰或杠冲突时，按逆时针离出牌家最近者优先。</p>
+      <p>普通模式有人胡牌即结算；牌山摸空仍无人胡牌则流局。</p>
+      <h3>计番与赔付</h3>
+      <p>1 番起胡，1 番赔 2 筹码，此后每多一番翻倍，6 番封顶。自摸由其余三家各付一份；点胡与抢杠只由放铳家或加杠者付一份，庄家不加倍。</p>
+      <p>不重复：一个番种已包含另一个时，不再计被包含的番。不拆移：同一胡牌分组不能拆开重组后，再重复累计其他番。</p>
+      <p>对数字有限制的番种，至少要有一张数字牌；符号牌数量不受该数字条件限制。</p>
+      <p>规则书中的诈胡罚则为赔三家各 64 筹码。网页只允许合法胡牌，未启用诈胡罚分。</p>
+      <h3>网页对局补充</h3>
+      <p>网页首局庄家按座位设置；结算后由房主确认下一局。默认先有 30 秒理牌时间，房主可调整或跳过。</p>
+      <p>血战模式中，胡牌者退出本局，其余玩家继续；累计三家胡牌或牌山摸空结束。自摸只由尚未胡牌的对手付款。</p>
+    </section>
+    <section class="reference-content" id="reference-pool" role="tabpanel" aria-labelledby="reference-tab-pool" tabindex="0" hidden>
+      <p class="reference-intro">开局固定牌池：共 24 种、108 张。数字牌 88 张，符号牌 20 张。</p>
+      <table class="reference-pool-table"><caption>牌值、传统图案与固定张数</caption><thead><tr><th scope="col">牌值</th><th scope="col">传统图案</th><th scope="col">张数</th></tr></thead><tbody>
+        <tr data-pool-value="0"><th scope="row">0</th><td>西风</td><td>4</td></tr>
+        <tr data-pool-value="1"><th scope="row">1</th><td>一条</td><td>4</td></tr>
+        <tr data-pool-value="2"><th scope="row">2</th><td>二条</td><td>6</td></tr>
+        <tr data-pool-value="3"><th scope="row">3</th><td>三条</td><td>6</td></tr>
+        <tr data-pool-value="4"><th scope="row">4</th><td>四条</td><td>6</td></tr>
+        <tr data-pool-value="5"><th scope="row">5</th><td>五条</td><td>4</td></tr>
+        <tr data-pool-value="6"><th scope="row">6</th><td>六条</td><td>6</td></tr>
+        <tr data-pool-value="7"><th scope="row">7</th><td>七条</td><td>4</td></tr>
+        <tr data-pool-value="8"><th scope="row">8</th><td>八条</td><td>4</td></tr>
+        <tr data-pool-value="9"><th scope="row">9</th><td>九条</td><td>4</td></tr>
+        <tr data-pool-value="10"><th scope="row">10</th><td>北风</td><td>4</td></tr>
+        <tr data-pool-value="11"><th scope="row">11</th><td>一筒</td><td>2</td></tr>
+        <tr data-pool-value="12"><th scope="row">12</th><td>二筒</td><td>4</td></tr>
+        <tr data-pool-value="13"><th scope="row">13</th><td>三筒</td><td>2</td></tr>
+        <tr data-pool-value="14"><th scope="row">14</th><td>四筒</td><td>4</td></tr>
+        <tr data-pool-value="15"><th scope="row">15</th><td>五筒</td><td>4</td></tr>
+        <tr data-pool-value="16"><th scope="row">16</th><td>六筒</td><td>4</td></tr>
+        <tr data-pool-value="17"><th scope="row">17</th><td>七筒</td><td>2</td></tr>
+        <tr data-pool-value="18"><th scope="row">18</th><td>八筒</td><td>4</td></tr>
+        <tr data-pool-value="19"><th scope="row">19</th><td>九筒</td><td>2</td></tr>
+        <tr data-pool-value="20"><th scope="row">20</th><td>南风</td><td>4</td></tr>
+        <tr data-pool-value="24"><th scope="row">24</th><td>四万</td><td>4</td></tr>
+        <tr data-pool-value="+"><th scope="row">+</th><td>红中</td><td>8</td></tr>
+        <tr data-pool-value="×"><th scope="row">×</th><td>发财</td><td>12</td></tr>
+      </tbody></table>
+    </section>
+    <section class="reference-content" id="reference-fans" role="tabpanel" aria-labelledby="reference-tab-fans" tabindex="0" hidden>
+      <p class="reference-intro">按规则书从高到低排列。“特殊胡法”不要求普通的三组加一对结构。示例中的双空格用于分组，没有等号牌；示例牌型还可能满足其他番种。</p>
+      <p>1 番起胡，多一番翻倍，6 番封顶。不重复计已被包含的番种。</p>
+      <h3 class="reference-fan-tier">6 番</h3>
+      <article class="reference-fan" data-fan="DA_SAN_YUAN" data-points="6"><h4>大三元</h4><p>拥有 +、× 一共至少 9 张。</p><p class="reference-example">例：++++  ××××  2 + 11 13  4 4</p></article>
+      <article class="reference-fan" data-fan="DA_SI_XI" data-points="6"><h4>大四喜</h4><p>牌组中的 0、10、20 合计至少 6 张。</p><p class="reference-example">例：0 + 10 10  0 + 20 20  10 + 10 20  1 1</p><p class="reference-note">此例另计加一色。</p></article>
+      <article class="reference-fan" data-fan="QI_YI_SE" data-points="6"><h4>奇一色</h4><p>牌组中每个数字都是奇数。</p><p class="reference-example">例：3 3 3 3  3 × 3 9  1 × 7 7  5 5</p></article>
+      <article class="reference-fan" data-fan="LIAN_QI_DUI" data-points="6"><h4>连七对 <span class="reference-special">特殊胡法</span></h4><p>七个对子，其七个不同的数字牌值成等差数列。不重复计七小对。</p><p class="reference-example">例：2 2  3 3  4 4  5 5  6 6  7 7  8 8</p></article>
+      <article class="reference-fan" data-fan="QUAN_ZHI_SHU" data-points="6"><h4>全质数</h4><p>牌组中每个数字都是质数或 1。可用数字为 1、2、3、5、7、11、13、17、19。</p><p class="reference-example">例：2 + 3 5  1 × 3 3  2 + 11 13  2 2</p></article>
+      <article class="reference-fan" data-fan="SAN_KE_ZI" data-points="6"><h4>三刻子</h4><p>拥有三个刻子的胡牌。</p><p class="reference-example">例：2 2 2 2  3 3 3 3  ××××  ++</p></article>
+      <h3 class="reference-fan-tier">5 番</h3>
+      <article class="reference-fan" data-fan="QUAN_ER_MI" data-points="5"><h4>全二幂</h4><p>有数字牌，且每个数字都是 2 的整数幂，包括 1。可用数字为 1、2、4、8、16。</p><p class="reference-example">例：2 × 2 4  4 + 4 8  1 × 16 16  2 2</p></article>
+      <article class="reference-fan" data-fan="SAN_TONG_SHI" data-points="5"><h4>三同式</h4><p>拥有三个相同的式子。不重复计一对式。</p><p class="reference-example">例：2 × 3 6  2 × 3 6  2 × 3 6  1 1</p><p class="reference-note">此例另计乘一色。</p></article>
+      <article class="reference-fan" data-fan="QING_LONG" data-points="5"><h4>清龙 <span class="reference-special">特殊胡法</span></h4><p>12 个连续数字外加一个对子。</p><p class="reference-example">例：1 2 3 4 5 6 7 8 9 10 11 12  16 16</p></article>
+      <h3 class="reference-fan-tier">4 番</h3>
+      <article class="reference-fan" data-fan="QUAN_DUO_BEI" data-points="4"><h4>全多倍</h4><p>牌组中每个数字都是同一个整数 n 的倍数，n 至少为 4。不叠加全三倍和全偶数。</p><p class="reference-example">例：4 + 12 16  4 × 4 16  8 + 16 24  20 20</p></article>
+      <article class="reference-fan" data-fan="QUAN_ER_WEI" data-points="4"><h4>全二位</h4><p>牌组中每个数字都是 10 或以上。</p><p class="reference-example">例：12 + 12 24  11 + 13 24  20 20 20 20  ××</p></article>
+      <h3 class="reference-fan-tier">3 番</h3>
+      <article class="reference-fan" data-fan="TIAN_HU" data-points="3"><h4>天胡</h4><p>起手听牌，在自己打出第一张牌之前胡牌。</p></article>
+      <article class="reference-fan" data-fan="QUAN_SAN_BEI" data-points="3"><h4>全三倍</h4><p>牌组中每个数字都是 3 的倍数。有全多倍时不计；不叠加全偶数。</p><p class="reference-example">例：3 + 12 15  3 × 6 18  6 + 18 24  3 3</p></article>
+      <h3 class="reference-fan-tier">2 番</h3>
+      <article class="reference-fan" data-fan="QUAN_YI_WEI" data-points="2"><h4>全一位</h4><p>所有数字都是一位数，即 0～9。</p><p class="reference-example">例：2 × 2 4  1 × 7 7  3 3 3 3  0 0</p></article>
+      <article class="reference-fan" data-fan="QI_XIAO_DUI" data-points="2"><h4>七小对 <span class="reference-special">特殊胡法</span></h4><p>由七个不同的对子胡牌。四张同值牌不能算两个对子。</p><p class="reference-example">例：2 2  3 3  4 4  5 5  6 6  7 7  9 9</p></article>
+      <article class="reference-fan" data-fan="QUAN_OU_SHU" data-points="2"><h4>全偶数</h4><p>牌组中每个数字都是偶数。有全三倍或全多倍时不计。</p><p class="reference-example">例：4 × 4 16  2 + 12 14  8 + 8 16  18 18</p></article>
+      <article class="reference-fan" data-fan="SAN_MEN_QI" data-points="2"><h4>三门齐</h4><p>由一个刻子、一个加法式子、一个乘法式子和一个对子组成。</p><p class="reference-example">例：1 + 9 10  4 × 4 16  2 2 2 2  18 18</p></article>
+      <h3 class="reference-fan-tier">1 番</h3>
+      <article class="reference-fan" data-fan="CHUAN_TONG_MAJIANG" data-points="1"><h4>传统麻将 <span class="reference-special">特殊胡法</span></h4><p>按牌面中间图案，以国标麻将的四组加一对胡牌，不考虑国标起胡番。每组为三个相同图案，或同花色的连续三张数牌；有七小对时不计。</p><p class="reference-example">例：1 2 3  4 4 4  16 17 18  16 17 18  ++</p></article>
+      <article class="reference-fan" data-fan="YI_DUI_SHI" data-points="1"><h4>一对式</h4><p>有两个相同式子的胡牌。</p><p class="reference-example">例：2 × 3 6  2 × 3 6  2 × 4 8  10 10</p></article>
+      <article class="reference-fan" data-fan="JIA_YI_SE" data-points="1"><h4>加一色</h4><p>三个式子全部是加法。</p><p class="reference-example">例：1 + 10 11  3 + 15 18  4 + 16 20  12 12</p></article>
+      <article class="reference-fan" data-fan="CHENG_YI_SE" data-points="1"><h4>乘一色</h4><p>三个式子全部是乘法。</p><p class="reference-example">例：1 × 2 2  3 × 3 9  4 × 4 16  5 5</p></article>
+      <article class="reference-fan" data-fan="BU_QIU_REN" data-points="1"><h4>不求人</h4><p>没有任何吃、碰、明杠的自摸胡牌。暗杠不影响此番，加杠不满足此番。</p></article>
+    </section>
+  </aside>
 
   <div class="workspace">
     <main class="play-area">

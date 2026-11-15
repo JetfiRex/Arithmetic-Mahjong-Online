@@ -39,6 +39,36 @@ button { border: 0; }
 .scene-select .icon { width: 15px; height: 15px; flex-basis: 15px; }
 .icon-button { width: 32px; height: 32px; background: transparent; color: #718074; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; padding: 0; flex-shrink: 0; }
 .icon-button:hover:not(:disabled) { color: #234b36; background: #e9eee7; }
+.reference-toggle { position: fixed; top: 146px; left: 0; z-index: 5; display: flex; flex-direction: column; align-items: center; gap: 7px; width: 38px; padding: 12px 5px; border: 1px solid #cbd8ca; border-left: 0; border-radius: 0 9px 9px 0; background: #f8faf3; color: #45654c; box-shadow: 2px 3px 12px #173d241a; font-size: 11px; }
+.reference-toggle:hover { background: #eaf0e3; }
+.reference-open .reference-toggle { visibility: hidden; }
+.reference-sidebar { position: fixed; top: 78px; bottom: 0; left: 0; z-index: 7; display: flex; flex-direction: column; width: 360px; max-width: calc(100vw - 16px); border-right: 1px solid #cdd9cb; background: #fbfcf7; color: #304735; box-shadow: 12px 0 35px #133b2524; }
+.reference-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 20px 20px 15px; background: #f0f4e9; flex-shrink: 0; }
+.reference-heading h2 { margin: 4px 0 0; font-size: 18px; font-weight: 600; }
+.reference-tabs { display: flex; gap: 4px; padding: 0 14px 12px; border-bottom: 1px solid #dce5d7; background: #f0f4e9; flex-shrink: 0; }
+.reference-tabs button { flex: 1; min-width: 0; padding: 9px 4px; border-radius: 5px; background: transparent; color: #7a8b73; font-size: 12px; white-space: nowrap; }
+.reference-tabs button[aria-selected="true"] { background: #fffef9; color: #34583d; box-shadow: 0 1px 4px #284a2820; }
+.reference-toggle:focus-visible, .reference-tabs button:focus-visible { outline: 2px solid #6c9367; outline-offset: -2px; }
+.reference-content { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 18px 20px 30px; scrollbar-width: thin; font-size: 13px; line-height: 1.85; overflow-wrap: anywhere; }
+.reference-content h3 { font-size: 14px; margin: 22px 0 9px; color: #34553d; }
+.reference-content h4 { margin: 0 0 5px; font-size: 14px; font-weight: 600; }
+.reference-content p { margin: 0 0 12px; }
+.reference-content .reference-intro { color: #7c8975; font-size: 12px; }
+.reference-definitions { margin: 0 0 14px; }
+.reference-definitions dt { margin-top: 12px; font-weight: 600; }
+.reference-definitions dd { margin: 3px 0 0; }
+.reference-content .reference-example { padding: 9px 11px; border-radius: 5px; background: #eef2e6; color: #49623f; font-family: "Cascadia Mono", Consolas, "Microsoft YaHei", monospace; font-size: 12px; line-height: 1.9; white-space: pre-wrap; }
+.reference-content .reference-fan-tier { margin: 20px 0 0; padding: 6px 10px; border-left: 3px solid #76976c; background: #e7eedf; font-size: 15px; }
+.reference-fan { padding: 16px 0 4px; border-bottom: 1px solid #e4e9de; }
+.reference-special { font-size: 10px; font-weight: 400; color: #879572; margin-left: 5px; white-space: nowrap; }
+.reference-content .reference-note { font-size: 11px; color: #87917e; }
+.reference-pool-table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: left; }
+.reference-pool-table caption { font-size: 11px; text-align: left; color: #87917e; padding-bottom: 12px; }
+.reference-pool-table th, .reference-pool-table td { padding: 9px 6px; border-bottom: 1px solid #e4e9de; }
+.reference-pool-table thead th { font-size: 11px; color: #87917e; font-weight: 400; }
+.reference-pool-table th:last-child, .reference-pool-table td:last-child { text-align: right; }
+@media (min-width: 1560px) { .reference-open .workspace { margin-left: 360px; } }
+@media (max-width: 820px) { .reference-toggle { top: 116px; width: 32px; padding: 10px 3px; } .reference-sidebar { top: 66px; } .reference-content { padding-bottom: max(90px, env(safe-area-inset-bottom)); } }
 .workspace { display: grid; grid-template-columns: minmax(0, 1fr) 310px; min-height: calc(100vh - 78px); }
 .play-area { min-width: 0; display: flex; flex-direction: column; }
 .table-surface { position: relative; overflow: hidden; background: #285844; color: #e5ece2; min-height: 320px; height: calc(100vh - 340px); max-height: 555px; padding: 25px 30px 22px; display: flex; flex-direction: column; }

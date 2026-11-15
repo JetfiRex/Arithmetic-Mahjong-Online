@@ -266,6 +266,7 @@ def create_app(*, settings=None, runtime=None):
     @app.api_route("/{path:path}", methods=["GET", "HEAD"])
     def asset(path: str):
         paths = {"app.js": SHARED_STATIC / "app.js", "styles.css": SHARED_STATIC / "styles.css",
+                 "reference.js": SHARED_STATIC / "reference.js",
                  "multiplayer.js": LOCAL_STATIC / "client.js", "multiplayer.css": LOCAL_STATIC / "local.css",
                  "chat.js": LOCAL_STATIC / "chat.js"}
         if path.startswith("tiles/") and path[6:] in TILE_NAMES:
